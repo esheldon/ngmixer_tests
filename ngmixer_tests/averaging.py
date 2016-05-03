@@ -8,6 +8,15 @@ import ngmix
 import esutil as eu
 from esutil.numpy_util import between
 
+def get_run_flist(run):
+    dir=os.environ['NGMIXER_OUTPUT_DIR']
+    dir=os.path.join(dir, run,'output')
+    pattern=os.path.join(dir, '*.fits')
+    print("pattern:",pattern)
+    flist=glob(pattern)
+    print("found",len(flist),"files")
+    return flist
+
 class AveragerBase(dict):
     def __init__(self, step=0.01, chunksize=1000000, matchcat=None):
 
@@ -24,17 +33,9 @@ class AveragerBase(dict):
         run through all the collated files for the specified run
         """
 
-        flist=self.get_run_flist(run)
+        flist=get_run_flist(run)
         return self.process_flist(flist)
 
-    def get_run_flist(self, run):
-        dir=os.environ['NGMIXER_OUTPUT_DIR']
-        dir=os.path.join(dir, run,'output')
-        pattern=os.path.join(dir, '*.fits')
-        print("pattern:",pattern)
-        flist=glob(pattern)
-        print("found",len(flist),"files")
-        return flist
 
     def process_flist(self, flist):
         """
@@ -72,6 +73,7 @@ class AveragerBase(dict):
         self.means /= sums['wsum']
 
         means=self.get_shears(sums)
+        means['means'] = self.means
         return means
 
     def do_sums(self, data, sums=None):
@@ -115,16 +117,6 @@ class AveragerBase(dict):
         # not corrected for selections
         sh_nocorr=get_shear_struct(nbin)
 
-        # one ber bin
-        g        = means['g']
-        gpsf     = means['gpsf']
-
-        # averaged over all bins
-        R        = means['R']
-        Rsel     = means['Rsel']
-        Rpsf     = means['Rpsf']
-        Rpsf_sel = means['Rpsf_sel']
-
         for i in xrange(nbin):
 
             num       = sums['wsum'][i]
@@ -133,6 +125,11 @@ class AveragerBase(dict):
 
             gsq       = means['gsq'][i]
             gpsf_sq   = means['gpsf_sq'][i]
+
+            R         = means['R'][i]
+            Rsel      = means['Rsel'][i]
+            Rpsf      = means['Rpsf'][i]
+            Rpsf_sel  = means['Rpsf_sel'][i]
 
             # wsum is a count when we are not doing weights
             # need to do get the sums right for weights
@@ -155,6 +152,14 @@ class AveragerBase(dict):
 
             shear_err        = gerr/(R+Rsel)
             shear_nocorr_err = gerr_nocorr/R
+            '''
+            shear        = (gmean-c)
+            shear_nocorr = (gmean-c_nocorr)
+
+            shear_err        = gerr
+            shear_nocorr_err = gerr_nocorr
+            '''
+
 
             sh['shear'][i] = shear
             sh['shear_err'][i] = shear_err
@@ -175,7 +180,6 @@ class AveragerBase(dict):
         Also average the responses over all data
         """
 
-        # g averaged in each field
         g    = sums['g'].copy()
         gsq  = sums['gsq'].copy()
         gpsf_sq  = sums['gpsf_sq'].copy()
@@ -192,49 +196,47 @@ class AveragerBase(dict):
         gpsf[:,1] *= winv
 
         # responses averaged over all fields
-        R = numpy.zeros(2)
-        Rpsf = numpy.zeros(2)
-        Rsel = numpy.zeros(2)
-        Rpsf_sel = numpy.zeros(2)
+        R = 0*g
+        Rpsf = 0*g
+        Rsel = 0*g
+        Rpsf_sel = 0*g
 
         factor = 1.0/(2.0*self['step'])
 
-        wsum=sums['wsum'].sum()
+        g1p = sums['g_1p'][:,0]*winv
+        g1m = sums['g_1m'][:,0]*winv
+        g2p = sums['g_2p'][:,1]*winv
+        g2m = sums['g_2m'][:,1]*winv
 
-        g1p = sums['g_1p'][:,0].sum()/wsum
-        g1m = sums['g_1m'][:,0].sum()/wsum
-        g2p = sums['g_2p'][:,1].sum()/wsum
-        g2m = sums['g_2m'][:,1].sum()/wsum
+        g1p_psf = sums['g_1p_psf'][:,0]*winv
+        g1m_psf = sums['g_1m_psf'][:,0]*winv
+        g2p_psf = sums['g_2p_psf'][:,1]*winv
+        g2m_psf = sums['g_2m_psf'][:,1]*winv
 
-        g1p_psf = sums['g_1p_psf'][:,0].sum()/wsum
-        g1m_psf = sums['g_1m_psf'][:,0].sum()/wsum
-        g2p_psf = sums['g_2p_psf'][:,1].sum()/wsum
-        g2m_psf = sums['g_2m_psf'][:,1].sum()/wsum
-
-        R[0] = (g1p - g1m)*factor
-        R[1] = (g2p - g2m)*factor
-        Rpsf[0] = (g1p_psf - g1m_psf)*factor
-        Rpsf[1] = (g2p_psf - g2m_psf)*factor
+        R[:,0] = (g1p - g1m)*factor
+        R[:,1] = (g2p - g2m)*factor
+        Rpsf[:,0] = (g1p_psf - g1m_psf)*factor
+        Rpsf[:,1] = (g2p_psf - g2m_psf)*factor
 
         print("R:",R)
         print("Rpsf:",Rpsf)
 
         # selection terms
         if self['do_select']:
-            s_g1p = sums['s_g_1p'][:,0].sum()/sums['s_wsum_1p'].sum()
-            s_g1m = sums['s_g_1m'][:,0].sum()/sums['s_wsum_1m'].sum()
-            s_g2p = sums['s_g_2p'][:,1].sum()/sums['s_wsum_2p'].sum()
-            s_g2m = sums['s_g_2m'][:,1].sum()/sums['s_wsum_2m'].sum()
+            s_g1p = sums['s_g_1p'][:,0]/sums['s_wsum_1p']
+            s_g1m = sums['s_g_1m'][:,0]/sums['s_wsum_1m']
+            s_g2p = sums['s_g_2p'][:,1]/sums['s_wsum_2p']
+            s_g2m = sums['s_g_2m'][:,1]/sums['s_wsum_2m']
 
-            s_g1p_psf = sums['s_g_1p_psf'][:,0].sum()/sums['s_wsum_1p_psf'].sum()
-            s_g1m_psf = sums['s_g_1m_psf'][:,0].sum()/sums['s_wsum_1m_psf'].sum()
-            s_g2p_psf = sums['s_g_2p_psf'][:,1].sum()/sums['s_wsum_2p_psf'].sum()
-            s_g2m_psf = sums['s_g_2m_psf'][:,1].sum()/sums['s_wsum_2m_psf'].sum()
+            s_g1p_psf = sums['s_g_1p_psf'][:,0]/sums['s_wsum_1p_psf']
+            s_g1m_psf = sums['s_g_1m_psf'][:,0]/sums['s_wsum_1m_psf']
+            s_g2p_psf = sums['s_g_2p_psf'][:,1]/sums['s_wsum_2p_psf']
+            s_g2m_psf = sums['s_g_2m_psf'][:,1]/sums['s_wsum_2m_psf']
 
-            Rsel[0] = (s_g1p - s_g1m)*factor
-            Rsel[1] = (s_g2p - s_g2m)*factor
-            Rpsf_sel[0] = (s_g1p_psf - s_g1m_psf)*factor
-            Rpsf_sel[1] = (s_g2p_psf - s_g2m_psf)*factor
+            Rsel[:,0] = (s_g1p - s_g1m)*factor
+            Rsel[:,1] = (s_g2p - s_g2m)*factor
+            Rpsf_sel[:,0] = (s_g1p_psf - s_g1m_psf)*factor
+            Rpsf_sel[:,1] = (s_g2p_psf - s_g2m_psf)*factor
 
             print("Rsel:",Rsel)
             print("Rpsf_sel:",Rpsf_sel)
@@ -270,6 +272,17 @@ class AveragerBase(dict):
         w, = numpy.where( (data['flags'] == 0) & (data['mcal_s2n_r'] != -9999.0))
 
         return w
+
+    def get_type_string(self, mcal_type):
+        """
+        mcal_name is for noshear
+        mcal_name_{mcal_type} for others
+        """
+        if mcal_type=='noshear':
+            tstr=''
+        else:
+            tstr='_%s' % mcal_type
+        return tstr
 
     def _get_sums_struct(self, n):
         """
@@ -397,9 +410,29 @@ class FieldAverager(AveragerBase):
 
     def get_selection_args(self, data, mcal_type):
         """
-        get data used for selection
+        get the default set
         """
-        raise NotImplementedError("implement in concrete class")
+        tstr=self.get_type_string(mcal_type)
+
+        gpsf = data['mcal_gpsf'][:,self['element']]
+        Tpsf = data['mcal_Tpsf']
+
+        T = data['mcal_T_r%s' % tstr]
+
+        Tvar = data['mcal_T_err%s' % tstr]
+        Terr=numpy.zeros(Tvar.size) + 1.e9
+
+        w,=numpy.where(Tvar > 0.0)
+        if w.size > 0:
+            Terr[w] = numpy.sqrt(Tvar[w])
+
+        Ts2n = T/Terr
+
+        s2n_field = 'mcal_s2n_r%s' % tstr
+        s2n = data[s2n_field]
+
+
+        return gpsf, s2n, Ts2n, T, Terr, Tpsf
 
     def do_selection(self, data, mcal_type, binnum):
         """
@@ -464,27 +497,38 @@ class S2NAverager(FieldAverager):
     def __init__(self, selections, **kw):
         super(S2NAverager,self).__init__('mcal_s2n_r', selections, **kw)
 
-    def get_selection_args(self, data, mcal_type):
-        if mcal_type=='noshear':
-            tstr=''
-        else:
-            tstr='_%s' % mcal_type
 
-        s2n_field = 'mcal_s2n_r%s' % tstr
-        s2n = data[s2n_field]
-        return s2n
+    def do_selection(self, data, mcal_type, binnum):
+        """
+        cut on flags and s/n
+        """
+        gpsf, s2n, Ts2n, T, Terr, Tpsf = self.get_selection_args(data, mcal_type)
+
+        selection=self['selections'][binnum]
+        cut_logic = eval(selection)
+
+        return cut_logic, s2n
+
+class S2NTS2NAverager(FieldAverager):
+    """
+    The following variables are made available for selection
+
+    s2n, Ts2n, T, Tpsf
+    """
 
     def do_selection(self, data, mcal_type, binnum):
         """
         cut on flags and s/n
         """
 
-        s2n = self.get_selection_args(data, mcal_type)
+        gpsf, s2n, Ts2n, T, Terr, Tpsf =self.get_selection_args(data, mcal_type)
 
         selection=self['selections'][binnum]
+
         cut_logic = eval(selection)
 
-        return cut_logic, s2n
+        return cut_logic, Ts2n
+
 
 class FieldBinner(FieldAverager):
     def __init__(self,
@@ -522,13 +566,138 @@ class FieldBinner(FieldAverager):
             selections += [sel]
         return selections
 
-class PSFS2NBinner(FieldBinner):
+class S2NBinner(FieldBinner):
+    """
+    Bin by S/N
+
+    following variables are made available for selection
+        s2n, Ts2n, T, Tpsf
+    """
+    def __init__(self,
+                 xmin,
+                 xmax,
+                 nbin,
+                 other_selection,
+                 **kw):
+
+        # note it is abbreviated; ok since in do_selection
+        # we used the abbreviated for. Also s2n rather than
+        # full
+        field_base='s2n'
+
+        super(S2NBinner,self).__init__(
+            field_base,
+            xmin,
+            xmax,
+            nbin,
+            extra=other_selection,
+            **kw
+        )
+
+    def do_selection(self, data, mcal_type, binnum):
+        """
+        cut on flags and s/n
+        """
+
+        gpsf, s2n, Ts2n, T, Terr, Tpsf = \
+                self.get_selection_args(data, mcal_type)
+
+        selection=self['selections'][binnum]
+
+        cut_logic = eval(selection)
+
+        return cut_logic, s2n
+
+class LogS2NBinner(S2NBinner):
+    """
+    Bin by S/N
+
+    following variables are made available for selection
+        logs2n, Ts2n, T, Tpsf
+    """
+    def __init__(self,
+                 xmin,
+                 xmax,
+                 nbin,
+                 other_selection,
+                 **kw):
+
+        # note it is abbreviated; ok since in do_selection
+        # we used the abbreviated for. Also s2n rather than
+        # full
+        field_base='logs2n'
+
+        # note calling super of super
+        super(S2NBinner,self).__init__(
+            field_base,
+            xmin,
+            xmax,
+            nbin,
+            extra=other_selection,
+            **kw
+        )
+
+    def get_selection_args(self, data, mcal_type):
+        """
+        convert s2nto log s2n
+        """
+        gpsf, s2n, Ts2n, T, Terr, Tpsf=super(LogS2NBinner,self).get_selection_args(data, mcal_type)
+        logs2n=numpy.log10( s2n.clip(min=0.001))
+        return logs2n, gpsf, s2n, Ts2n, T, Terr, Tpsf
+
+    def do_selection(self, data, mcal_type, binnum):
+        """
+        cut on flags and s/n
+        """
+
+        logs2n, gpsf, s2n, Ts2n, T, Terr, Tpsf = \
+                self.get_selection_args(data, mcal_type)
+
+        selection=self['selections'][binnum]
+
+        cut_logic = eval(selection)
+
+        return cut_logic, logs2n
+
+    def doplot(self, x, d, **kw):
+        """
+        plot the results
+
+        parameters
+        ----------
+        x: x values
+            Should be self.means
+        d: dict
+            result of running something like process_run or process_flist
+        **kw:
+            extra plotting keywords
+        """
+        from pyxtools import plot
+
+        sh=d['shear']['shear']
+        sherr=d['shear']['shear_err']
+
+        kw['xlog']=True
+
+        g=plot(10.0**x, sh[:,0], dy=sherr[:,0], color='blue', **kw)
+        plot(10.0**x, sh[:,1], dy=sherr[:,1], color='red', g=g, **kw)
+
+        return g
+
+
+class PSFShapeBinner(FieldBinner):
+    """
+    Bin by psf shape
+
+    following variables are made available for selection
+        gpsf, s2n, Ts2n, T, Tpsf
+    """
     def __init__(self,
                  xmin,
                  xmax,
                  nbin,
                  element, # 0 or 1
-                 s2n_selection,
+                 other_selection,
                  **kw):
 
         # note it is abbreviated; ok since in do_selection
@@ -538,82 +707,110 @@ class PSFS2NBinner(FieldBinner):
 
         self['element'] = element
 
-        super(PSFS2NBinner,self).__init__(
+        super(PSFShapeBinner,self).__init__(
             field_base,
             xmin,
             xmax,
             nbin,
-            extra=s2n_selection,
+            extra=other_selection,
+            **kw
+        )
+
+    def do_selection(self, data, mcal_type, binnum):
+        """
+        cut on flags and s/n
+        """
+
+        gpsf, s2n, Ts2n, T, Terr, Tpsf = \
+                self.get_selection_args(data, mcal_type)
+
+        selection=self['selections'][binnum]
+
+        cut_logic = eval(selection)
+
+        return cut_logic, gpsf
+
+    def doplot(self, d, file=None, **kw):
+        """
+        plot the results
+
+        parameters
+        ----------
+        d: dict
+            result of running something like process_run or process_flist
+        **kw:
+            extra plotting keywords
+        """
+        from pyxtools import plot
+
+        sh=d['shear']['shear']
+        sherr=d['shear']['shear_err']
+
+        plt=plot(
+            d['means'], sh[:,0], dy=sherr[:,0],
+            xlabel=r'$g_{psf}$',
+            ylabel=r'$g$',
+            color='blue',
+            **kw)
+        plot(
+            d['means'], sh[:,1], dy=sherr[:,1],
+            color='red', plt=plt, file=file,
+            **kw)
+
+        return plt
+
+
+class TratioBinner(S2NBinner):
+    """
+    Bin by S/N
+
+    following variables are made available for selection
+        s2n, Ts2n, T, Tpsf, Tratio
+    """
+    def __init__(self,
+                 xmin,
+                 xmax,
+                 nbin,
+                 other_selection,
+                 **kw):
+
+        # note it is abbreviated; ok since in do_selection
+        # we used the abbreviated for. Also s2n rather than
+        # full
+        field_base='Tratio'
+
+        # note calling super of super
+        super(S2NBinner,self).__init__(
+            field_base,
+            xmin,
+            xmax,
+            nbin,
+            extra=other_selection,
             **kw
         )
 
     def get_selection_args(self, data, mcal_type):
-        gpsf = data['mcal_gpsf'][:,self['element']]
+        """
+        convert s2nto log s2n
+        """
+        gpsf, s2n, Ts2n, T, Terr, Tpsf=super(TratioBinner,self).get_selection_args(data, mcal_type)
 
-        if mcal_type=='noshear':
-            tstr=''
-        else:
-            tstr='_%s' % mcal_type
-
-        s2n_field = 'mcal_s2n_r%s' % tstr
-        s2n = data[s2n_field]
-        return gpsf, s2n
+        Tratio=T/Tpsf
+        return gpsf, s2n, Ts2n, T, Terr, Tpsf, Tratio
 
     def do_selection(self, data, mcal_type, binnum):
         """
         cut on flags and s/n
         """
 
-        gpsf, s2n =self.get_selection_args(data, mcal_type)
+        gpsf, s2n, Ts2n, T, Terr, Tpsf, Tratio = \
+                self.get_selection_args(data, mcal_type)
 
         selection=self['selections'][binnum]
 
         cut_logic = eval(selection)
 
-        return cut_logic, gpsf
-
-class PSFS2NTBinner(PSFS2NBinner):
-    """
-    don't have T_r available yet
-
-    even worse, not T_err is available for the sheared parameters
-
-    do have g cov though if we wanted to weight
-    """
-    def get_selection_args(self, data, mcal_type):
-        gpsf = data['mcal_gpsf'][:,self['element']]
-        Tpsf = data['mcal_Tpsf']
-        T = data['mcal_pars'][:,4]
-        Tvar = data['mcal_pars_cov'][:,4,4]
-
-        Terr=numpy.zeros(Tvar.size) + 1.e9
-
-        w,=numpy.where(Tvar > 0.0)
-        if w.size > 0:
-            Terr[w] = numpy.sqrt(Tvar[w])
-
-        if mcal_type=='noshear':
-            tstr=''
-        else:
-            tstr='_%s' % mcal_type
-
-        s2n_field = 'mcal_s2n_r%s' % tstr
-        s2n = data[s2n_field]
-        return gpsf, Tpsf, T, Terr, s2n
-
-    def do_selection(self, data, mcal_type, binnum):
-        """
-        cut on flags and s/n
-        """
-
-        gpsf, Tpsf, T, Terr, s2n =self.get_selection_args(data, mcal_type)
-
-        selection=self['selections'][binnum]
-
-        cut_logic = eval(selection)
-
-        return cut_logic, gpsf
-
+        return cut_logic, Tratio
 
 
 def get_shear_struct(n):
