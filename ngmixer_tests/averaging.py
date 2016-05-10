@@ -736,7 +736,7 @@ class PSFShapeBinner(FieldBinner):
     Bin by psf shape
 
     following variables are made available for selection
-        gpsf, s2n, Ts2n, T, Tpsf
+        gpsf, s2n, Ts2n, T, Terr, Tpsf
     """
     def __init__(self,
                  xmin,
