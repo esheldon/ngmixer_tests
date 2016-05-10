@@ -566,6 +566,39 @@ class FieldBinner(FieldAverager):
             selections += [sel]
         return selections
 
+    def doplot(self, d, file=None, xlabel=None, **kw):
+        """
+        plot the results
+
+        parameters
+        ----------
+        d: dict
+            result of running something like process_run or process_flist
+        **kw:
+            extra plotting keywords
+        """
+        from pyxtools import plot
+
+        sh=d['shear']['shear']
+        sherr=d['shear']['shear_err']
+
+        plt=plot(
+            d['means'], sh[:,0], dy=sherr[:,0],
+            xlabel=xlabel,
+            ylabel=r'$g$',
+            color='blue',
+            **kw
+        )
+        plot(
+            d['means'], sh[:,1], dy=sherr[:,1],
+            color='red', plt=plt, file=file,
+            **kw
+        )
+
+        return plt
+
+
+
 class S2NBinner(FieldBinner):
     """
     Bin by S/N
@@ -659,7 +692,7 @@ class LogS2NBinner(S2NBinner):
 
         return cut_logic, logs2n
 
-    def doplot(self, x, d, **kw):
+    def doplot(self, d, **kw):
         """
         plot the results
 
@@ -679,10 +712,23 @@ class LogS2NBinner(S2NBinner):
 
         kw['xlog']=True
 
-        g=plot(10.0**x, sh[:,0], dy=sherr[:,0], color='blue', **kw)
-        plot(10.0**x, sh[:,1], dy=sherr[:,1], color='red', g=g, **kw)
+        plt=plot(
+            10.0**d['means'],
+            sh[:,0],
+            dy=sherr[:,0],
+            color='blue',
+            **kw
+        )
+        plot(
+            10.0**d['means'],
+            sh[:,1],
+            dy=sherr[:,1],
+            color='red',
+            plt=plt,
+            **kw
+        )
 
-        return g
+        return plt
 
 
 class PSFShapeBinner(FieldBinner):
@@ -741,6 +787,14 @@ class PSFShapeBinner(FieldBinner):
         **kw:
             extra plotting keywords
         """
+
+        super(PSFShapeBinner,self).doplot(
+            d,
+            xlabel=r'$g_{PSF}$',
+            file=file,
+            **kw
+        )
+        '''
         from pyxtools import plot
 
         sh=d['shear']['shear']
@@ -751,13 +805,16 @@ class PSFShapeBinner(FieldBinner):
             xlabel=r'$g_{psf}$',
             ylabel=r'$g$',
             color='blue',
-            **kw)
+            **kw
+        )
         plot(
             d['means'], sh[:,1], dy=sherr[:,1],
             color='red', plt=plt, file=file,
-            **kw)
+            **kw
+        )
 
         return plt
+        '''
 
 
 class TratioBinner(S2NBinner):
