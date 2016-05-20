@@ -2,6 +2,7 @@ from __future__ import print_function
 import os
 from glob import glob
 import numpy
+from numpy import newaxis, sqrt, zeros
 import fitsio
 import ngmix
 
@@ -17,16 +18,17 @@ def get_run_flist(run):
     print("found",len(flist),"files")
     return flist
 
-class AveragerBase(dict):
-    def __init__(self, step=0.01, chunksize=1000000, matchcat=None):
+class AveragerBase(object):
+    def __init__(self, step=0.01, chunksize=1000000, matchcat=None, weight_type=None):
 
         self.matchcat=matchcat
 
-        self['chunksize'] = chunksize
-        self['step'] = step
+        self.chunksize = chunksize
+        self.step = step
 
-        # no selections in this base class
-        self['do_select']=False
+        self.element=None
+
+        self.weight_type=weight_type
 
     def process_run(self, run):
         """
@@ -36,13 +38,23 @@ class AveragerBase(dict):
         flist=get_run_flist(run)
         return self.process_flist(flist)
 
+    def process_run_cache(self, run):
+        """
+        use the cached file for speed
+        """
+        fname=get_run_cache_file(run)
+
+        if not os.path.exists(fname):
+            cache_run(run)
+
+        return self.process_flist([fname])
 
     def process_flist(self, flist):
         """
         run through a set of files, doing the sums for
         averages
         """
-        chunksize=self['chunksize']
+        chunksize=self.chunksize
         sums=None
         nf=len(flist)
 
@@ -77,30 +89,7 @@ class AveragerBase(dict):
         return means
 
     def do_sums(self, data, sums=None):
-        """
-        do all the sums, no binning for base class
-        """
-
-        if sums is None:
-            sums=self._get_sums_struct(1)
-
-        w=self.do_selection(data)
-        print("    kept: %d/%d" % (w.size, data.size))
-
-        # for weights, need to do gsq correctly
-        sums['wsum'][0] += w.size
-        sums['g'][0]    += data['mcal_g'][w].sum(axis=0)
-        sums['gsq'][0]  += (data['mcal_g'][w]**2).sum(axis=0)
-        sums['gpsf_sq'][0]  += (data['mcal_gpsf'][w]**2).sum(axis=0)
-        sums['gpsf'][0] += data['mcal_gpsf'][w].sum(axis=0)
-
-        for type in ngmix.metacal.METACAL_TYPES_SUB:
-            mcalname='mcal_g_%s' % type
-            sumname='g_%s' % type
-
-            sums[sumname][0] += data[mcalname][w].sum(axis=0)
-
-        return sums
+        raise NotImplementedError("implement in a base class")
 
     def get_shears(self, sums):
         """
@@ -119,47 +108,33 @@ class AveragerBase(dict):
 
         for i in xrange(nbin):
 
-            num       = sums['wsum'][i]
+            wsum      = sums['wsum'][i]
             gmean     = means['g'][i]
             gpsf_mean = means['gpsf'][i]
 
-            gsq       = means['gsq'][i]
-            gpsf_sq   = means['gpsf_sq'][i]
 
             R         = means['R'][i]
             Rsel      = means['Rsel'][i]
             Rpsf      = means['Rpsf'][i]
             Rpsf_sel  = means['Rpsf_sel'][i]
+            print("Rpsf:",Rpsf)
+            print("Rpsf_sel:",Rpsf_sel)
 
-            # wsum is a count when we are not doing weights
-            # need to do get the sums right for weights
-            gvar      = gsq - gmean**2
-            gpsf_var  = gpsf_sq - gpsf_mean**2
+            # terms for errors on weighted mean
+            err2sum = (       sums['gsq'][i] 
+                        - 2.0*sums['gwsq'][i]*gmean
+                        +     sums['wsqsum'][i]*gmean**2 )
 
+            gerr = sqrt(err2sum)/wsum
 
-            print("gpsf:",gpsf_mean)
             c        = (Rpsf + Rpsf_sel)*gpsf_mean
             c_nocorr = Rpsf*gpsf_mean
-
-            vartot        = gvar + gpsf_var*(Rpsf + Rpsf_sel)**2
-            vartot_nocorr = gvar + gpsf_var*Rpsf**2
-
-            gerr = numpy.sqrt(vartot/num)
-            gerr_nocorr = numpy.sqrt(vartot_nocorr/num)
 
             shear        = (gmean-c)/(R+Rsel)
             shear_nocorr = (gmean-c_nocorr)/R
 
             shear_err        = gerr/(R+Rsel)
-            shear_nocorr_err = gerr_nocorr/R
-            '''
-            shear        = (gmean-c)
-            shear_nocorr = (gmean-c_nocorr)
-
-            shear_err        = gerr
-            shear_nocorr_err = gerr_nocorr
-            '''
-
+            shear_nocorr_err = gerr/R
 
             sh['shear'][i] = shear
             sh['shear_err'][i] = shear_err
@@ -182,7 +157,6 @@ class AveragerBase(dict):
 
         g    = sums['g'].copy()
         gsq  = sums['gsq'].copy()
-        gpsf_sq  = sums['gpsf_sq'].copy()
         gpsf = sums['gpsf'].copy()
 
         winv = 1.0/sums['wsum']
@@ -190,8 +164,6 @@ class AveragerBase(dict):
         g[:,1]    *= winv
         gsq[:,0]  *= winv
         gsq[:,1]  *= winv
-        gpsf_sq[:,0]  *= winv
-        gpsf_sq[:,1]  *= winv
         gpsf[:,0] *= winv
         gpsf[:,1] *= winv
 
@@ -201,7 +173,7 @@ class AveragerBase(dict):
         Rsel = 0*g
         Rpsf_sel = 0*g
 
-        factor = 1.0/(2.0*self['step'])
+        factor = 1.0/(2.0*self.step)
 
         g1p = sums['g_1p'][:,0]*winv
         g1m = sums['g_1m'][:,0]*winv
@@ -222,31 +194,29 @@ class AveragerBase(dict):
         print("Rpsf:",Rpsf)
 
         # selection terms
-        if self['do_select']:
-            s_g1p = sums['s_g_1p'][:,0]/sums['s_wsum_1p']
-            s_g1m = sums['s_g_1m'][:,0]/sums['s_wsum_1m']
-            s_g2p = sums['s_g_2p'][:,1]/sums['s_wsum_2p']
-            s_g2m = sums['s_g_2m'][:,1]/sums['s_wsum_2m']
+        s_g1p = sums['s_g_1p'][:,0]/sums['s_wsum_1p']
+        s_g1m = sums['s_g_1m'][:,0]/sums['s_wsum_1m']
+        s_g2p = sums['s_g_2p'][:,1]/sums['s_wsum_2p']
+        s_g2m = sums['s_g_2m'][:,1]/sums['s_wsum_2m']
 
-            s_g1p_psf = sums['s_g_1p_psf'][:,0]/sums['s_wsum_1p_psf']
-            s_g1m_psf = sums['s_g_1m_psf'][:,0]/sums['s_wsum_1m_psf']
-            s_g2p_psf = sums['s_g_2p_psf'][:,1]/sums['s_wsum_2p_psf']
-            s_g2m_psf = sums['s_g_2m_psf'][:,1]/sums['s_wsum_2m_psf']
+        s_g1p_psf = sums['s_g_1p_psf'][:,0]/sums['s_wsum_1p_psf']
+        s_g1m_psf = sums['s_g_1m_psf'][:,0]/sums['s_wsum_1m_psf']
+        s_g2p_psf = sums['s_g_2p_psf'][:,1]/sums['s_wsum_2p_psf']
+        s_g2m_psf = sums['s_g_2m_psf'][:,1]/sums['s_wsum_2m_psf']
 
-            Rsel[:,0] = (s_g1p - s_g1m)*factor
-            Rsel[:,1] = (s_g2p - s_g2m)*factor
-            Rpsf_sel[:,0] = (s_g1p_psf - s_g1m_psf)*factor
-            Rpsf_sel[:,1] = (s_g2p_psf - s_g2m_psf)*factor
+        Rsel[:,0] = (s_g1p - s_g1m)*factor
+        Rsel[:,1] = (s_g2p - s_g2m)*factor
+        Rpsf_sel[:,0] = (s_g1p_psf - s_g1m_psf)*factor
+        Rpsf_sel[:,1] = (s_g2p_psf - s_g2m_psf)*factor
 
-            print("Rsel:",Rsel)
-            print("Rpsf_sel:",Rpsf_sel)
+        print("Rsel:",Rsel)
+        print("Rpsf_sel:",Rpsf_sel)
 
         res=dict(
             sums=sums, # original sum structure
             g=g,       # number of bins size
             gsq=gsq,   # number of bins size
             gpsf=gpsf, # number of bins size
-            gpsf_sq=gpsf_sq,   # number of bins size
             R=R,       # the following averaged over bins
             Rpsf=Rpsf,
             Rsel=Rsel,
@@ -254,24 +224,81 @@ class AveragerBase(dict):
         )
         return res
 
-
-    def do_selection(self, data, **kw):
+    def do_sanity_cuts(self, data):
         """
-        parameters
-        ----------
-        data: numpy array with fields
-            Should have fields at the minimum, perhaps more for selections
-                'mcal_g','mcal_gpsf',
-                'mcal_g_1p','mcal_g_1m',
-                'mcal_g_2p','mcal_g_2m',
-                'mcal_g_1p_psf','mcal_g_1m_psf',
-                'mcal_g_2p_psf','mcal_g_2m_psf',
+        the s2n cuts are for the bug not propagating flags
+        """
+        logic = (data['flags'] == 0)
+
+        w,=numpy.where(logic)
+        print("    keeping %d/%d from flag sanity cuts" % (w.size,data.size))
+        if self.matchcat is not None:
+            m,mcat = eu.numpy_util.match(
+                data['id'],
+                self.matchcat['coadd_objects_id'],
+            )
+            match_logic = numpy.zeros(data.size, dtype=bool)
+            match_logic[m] = True
+
+            w,=numpy.where(match_logic)
+            print("    keeping %d/%d from match sanity cuts" % (w.size,data.size))
+
+            logic = logic & match_logic
+            w,=numpy.where(logic)
+            print("        keeping %d/%d from both cuts" % (w.size,data.size))
+
+        return logic
+
+
+    def do_selection(self, data, mcal_type):
+        """
+        cut on flags and s/n
         """
 
-        # s2n check can be removed in new run
-        w, = numpy.where( (data['flags'] == 0) & (data['mcal_s2n_r'] != -9999.0))
+        s2n, Ts2n, T, Terr, Tpsf, Tratio = \
+                self.get_selection_args(data, mcal_type)
 
-        return w
+        cut_logic = eval(self.selection)
+        return cut_logic
+
+    def get_selection_args(self, data, mcal_type):
+        """
+        get the default set
+        """
+        tstr=self.get_type_string(mcal_type)
+
+        # this is the one for selections, not for Rpsf*gpsf
+        Tpsf = data['mcal_Tpsf']
+
+        T = data['mcal_T_r%s' % tstr]
+
+        Terr= data['mcal_T_err%s' % tstr]
+
+        Ts2n = T/Terr
+
+        s2n_field = 'mcal_s2n_r%s' % tstr
+        s2n = data[s2n_field]
+
+        Tratio=T/Tpsf
+
+        return s2n, Ts2n, T, Terr, Tpsf, Tratio
+
+    def _get_weights(self, data, mcal_type):
+        wtype=self.weight_type
+        if wtype is None:
+            weights=numpy.ones(data.size)
+        elif wtype=='err':
+            # use the shape error
+            SN2=0.21**2
+
+            tstr=self.get_type_string(mcal_type)
+            gcov = data['mcal_g_cov%s' % tstr]
+            weights = 1.0/(2*SN2 + gcov[:,0,0] + gcov[:,1,1])
+        else:
+            raise ValueError("bad weight type: %s" % wtype)
+
+        wa = weights[:,newaxis]
+        return weights, wa
 
     def get_type_string(self, mcal_type):
         """
@@ -296,11 +323,15 @@ class AveragerBase(dict):
         dtype for the structure to hold sums over the metacal parameters
         """
         dt=[
+            ('num','i8'),
             ('wsum','f8'),
             ('g','f8',2),
-            ('gsq','f8',2), # for variances
             ('gpsf','f8',2),
-            ('gpsf_sq','f8',2),
+
+            # terms for errors
+            ('wsqsum','f8'),
+            ('gsq','f8',2),
+            ('gwsq','f8',2),
 
             ('g_1p','f8',2),
             ('g_1m','f8',2),
@@ -333,240 +364,152 @@ class AveragerBase(dict):
         return dt
 
 
-class FieldAverager(AveragerBase):
-    """
-    cuts on one field
 
-    selections is any arbitrary selections, not a simple
-    binning
-    """
-    def __init__(self, field_base, selections, **kw):
-        """
-        field_base: string
-            name of base field
-        selections: string or list
-            e.g. 'x > 10' or ['x > 10','x > 15']
-        matchcat: array
-            Catalog with 'coadd_objects_id' to match in sanity cuts
-        """
-        super(FieldAverager,self).__init__(**kw)
+class FieldBinner(AveragerBase):
+    def __init__(self,
+                 field_base,
+                 xmin,
+                 xmax,
+                 nbin,
+                 selection=None, **kw):
 
+        self.field_base=field_base
+        self.xmin=xmin
+        self.xmax=xmax
+        self.nbin=nbin
+        self.selection=selection
 
-        self['field_base'] = field_base
-        self['do_select'] = True
-        self['use_logpars']=kw.get('use_logpars',False)
+        self.means=zeros(nbin)
 
-        # single selection
-        if not isinstance(selections,(list,tuple)):
-            selections = [selections]
-
-        self['selections'] = selections
-        self['nbin'] = len(selections)
-        self.means = numpy.zeros(self['nbin'])
-
-    def do_sanity_cuts(self, data):
-        """
-        the s2n cuts are for the bug not propagating flags
-        """
-        logic = (
-              (data['flags'] == 0)
-            #& (data['mask_frac'] < 0.1)
-            #& (data['mcal_s2n_r'] != val)
-            #& (data['mcal_s2n_r_1p'] != val)
-            #& (data['mcal_s2n_r_1m'] != val)
-            #& (data['mcal_s2n_r_2p'] != val)
-            #& (data['mcal_s2n_r_2m'] != val)
-            #& (data['mcal_s2n_r_1p_psf'] != val)
-            #& (data['mcal_s2n_r_1m_psf'] != val)
-            #& (data['mcal_s2n_r_2p_psf'] != val)
-            #& (data['mcal_s2n_r_2m_psf'] != val)
-            # need to save T_r
-            #& (data['mcal_pars'][:,4] > data['mcal_Tpsf'])
-            #& (data['mcal_pars'][:,4] > 0.5*data['mcal_Tpsf'])
-            #& (data['gauss_logsb'][:,1] < 4)
-
-            #& (numpy.sqrt(data['mcal_pars_cov'][:,2,2]) < 0.3)
-            #& (numpy.sqrt(data['mcal_pars_cov'][:,3,3]) < 0.3)
-        )
-
-        w,=numpy.where(logic)
-        print("    keeping %d/%d from flag sanity cuts" % (w.size,data.size))
-        if self.matchcat is not None:
-            m,mcat = eu.numpy_util.match(
-                data['id'],
-                self.matchcat['coadd_objects_id'],
-            )
-            match_logic = numpy.zeros(data.size, dtype=bool)
-            match_logic[m] = True
-
-            w,=numpy.where(match_logic)
-            print("    keeping %d/%d from match sanity cuts" % (w.size,data.size))
-
-            logic = logic & match_logic
-            w,=numpy.where(logic)
-            print("        keeping %d/%d from both cuts" % (w.size,data.size))
-
-        return logic
-
-    def get_selection_args(self, data, mcal_type):
-        """
-        get the default set
-        """
-        tstr=self.get_type_string(mcal_type)
-
-        gpsf = data['mcal_gpsf'][:,self['element']]
-        Tpsf = data['mcal_Tpsf']
-
-        T = data['mcal_T_r%s' % tstr]
-
-        Tvar = data['mcal_T_err%s' % tstr]
-        Terr=numpy.zeros(Tvar.size) + 1.e9
-
-        w,=numpy.where(Tvar > 0.0)
-        if w.size > 0:
-            Terr[w] = numpy.sqrt(Tvar[w])
-
-        Ts2n = T/Terr
-
-        s2n_field = 'mcal_s2n_r%s' % tstr
-        s2n = data[s2n_field]
-
-
-        return gpsf, s2n, Ts2n, T, Terr, Tpsf
-
-    def do_selection(self, data, mcal_type, binnum):
-        """
-        cut on flags and s/n
-        """
-        raise NotImplementedError("implement in concrete class")
+        super(FieldBinner,self).__init__(**kw)
 
     def do_sums(self, data, sums=None):
         """
         do all the sums, no binning for base class
         """
 
-        logic0 = self.do_sanity_cuts(data)
-
         if sums is None:
-            sums=self._get_sums_struct(self['nbin'])
+            sums=self._get_sums_struct(self.nbin)
 
-        # first select on the noshear measurement,
-        # sum up the estimator g and gpsf,
-        # then sum the sheared parameters for R
+        # ideally this selection should not depend on any sheared parameters
+        sanity_logic = self.do_sanity_cuts(data)
+        sane_data = data[sanity_logic]
 
-        for binnum in xrange(self['nbin']):
+        # first, selecting and binning by unsheared data
+        if self.selection is not None:
+            logic = self.do_selection(sane_data, 'noshear')
+            w,=numpy.where(logic)
+            print("    finally kept %d/%d after extra cuts" % (w.size, data.size))
+            selected_data=sane_data[w]
+        else:
+            selected_data=sane_data
 
-            cut_logic, fvalues = self.do_selection(data, 'noshear', binnum)
-            w, = numpy.where(logic0 & cut_logic)
-            print("    kept: %d/%d" % (w.size, data.size))
+        h, rev, fvalues = self.bin_data_by_type(selected_data, 'noshear')
+        assert h.size==self.nbin,"histogram size %d wrong" % h.size
 
-            # TODO: for weights, need to do gsq correctly
-            sums['wsum'][binnum]     +=  w.size
-            sums['g'][binnum]        +=  data['mcal_g'][w].sum(axis=0)
-            sums['gsq'][binnum]      += (data['mcal_g'][w]**2).sum(axis=0)
-            sums['gpsf'][binnum]     +=  data['mcal_gpsf'][w].sum(axis=0)
-            sums['gpsf_sq'][binnum]  += (data['mcal_gpsf'][w]**2).sum(axis=0)
+        for binnum in xrange(h.size):
+            if rev[binnum] != rev[binnum+1]:
 
-            self.means[binnum] += fvalues[w].sum(axis=0)
+                w = rev[ rev[binnum]:rev[binnum+1] ]
 
-            for type in ngmix.metacal.METACAL_TYPES_SUB:
-                mcalname='mcal_g_%s' % type
-                sumname='g_%s' % type
+                bdata = selected_data[w]
 
-                sums[sumname][binnum] += data[mcalname][w].sum(axis=0)
+                # weights based on non-sheared quantities
+                wts,wa=self._get_weights(bdata,'noshear')
 
-            # now the selection terms: select on sheared measurements
-            # but add up the unsheared estimator g
-            for type in ngmix.metacal.METACAL_TYPES_SUB:
+                sums['num'][binnum]  += w.size
+                sums['wsum'][binnum] += wts.sum()
+                sums['g'][binnum]    += (wa*bdata['mcal_g']).sum(axis=0)
+                sums['gpsf'][binnum] += (wa*bdata['mcal_gpsf']).sum(axis=0)
+                self.means[binnum]   += (wts*fvalues[w]).sum(axis=0)
 
-                wsumname = 's_wsum_%s' % type
-                sumname = 's_g_%s' % type
+                # terms for errors
+                sums['wsqsum'][binnum] += (wts**2).sum()
+                sums['gsq'][binnum]    += (wa**2 * bdata['mcal_g']**2).sum(axis=0)
+                sums['gwsq'][binnum]   += (wa**2 * bdata['mcal_g']).sum(axis=0)
 
-                cut_logic, fvalues = self.do_selection(data, type, binnum)
-                w, = numpy.where(logic0 & cut_logic)
+                # now the response terms, also based on selections/weights from
+                # unsheared data
+                for type in ngmix.metacal.METACAL_TYPES:
+                    if type=='noshear':
+                        continue
 
-                sums[wsumname][binnum] += w.size
-                sums[sumname][binnum]  += data['mcal_g'][w].sum(axis=0)
+                    tstr=self.get_type_string(type)
+
+                    mcalname='mcal_g%s' % tstr
+                    sumname='g%s' % tstr
+
+                    if mcalname in bdata.dtype.names:
+                        sums[sumname][binnum] += (wa*bdata[mcalname]).sum(axis=0)
+
+
+        # now, selecting and binning by sheared data
+        for type in ngmix.metacal.METACAL_TYPES:
+            if type=='noshear':
+                continue
+
+            if self.selection is not None:
+                logic = self.do_selection(sane_data, type)
+                selected_data=sane_data[logic]
+            else:
+                selected_data=sane_data
+
+            h, rev, fvalues = self.bin_data_by_type(selected_data, type)
+            assert h.size==self.nbin,"histogram size %d wrong" % h.size
+
+            for binnum in xrange(h.size):
+                if rev[binnum] != rev[binnum+1]:
+
+                    w = rev[ rev[binnum]:rev[binnum+1] ]
+
+                    bdata = selected_data[w]
+
+                    wts,wa=self._get_weights(bdata,type)
+
+
+                    # mean of unsheared g after selection/weighting based on
+                    # sheared parameters
+                    wsumname = 's_wsum_%s' % type
+                    sumname = 's_g_%s' % type
+                    sums[wsumname][binnum] += wts.sum()
+                    sums[sumname][binnum]  += (wa*bdata['mcal_g']).sum(axis=0)
 
         return sums
 
-class S2NAverager(FieldAverager):
-    """
-    averaging only over some s2n selection
-    """
-    def __init__(self, selections, **kw):
-        super(S2NAverager,self).__init__('mcal_s2n_r', selections, **kw)
+    def bin_data(self, data, field, element=None):
 
+        if element is not None:
+            fdata=data[field][:,self.element]
+        else:
+            fdata=data[field]
 
-    def do_selection(self, data, mcal_type, binnum):
-        """
-        cut on flags and s/n
-        """
-        gpsf, s2n, Ts2n, T, Terr, Tpsf = self.get_selection_args(data, mcal_type)
-
-        selection=self['selections'][binnum]
-        cut_logic = eval(selection)
-
-        return cut_logic, s2n
-
-class S2NTS2NAverager(FieldAverager):
-    """
-    The following variables are made available for selection
-
-    s2n, Ts2n, T, Tpsf
-    """
-
-    def do_selection(self, data, mcal_type, binnum):
-        """
-        cut on flags and s/n
-        """
-
-        gpsf, s2n, Ts2n, T, Terr, Tpsf =self.get_selection_args(data, mcal_type)
-
-        selection=self['selections'][binnum]
-
-        cut_logic = eval(selection)
-
-        return cut_logic, Ts2n
-
-
-class FieldBinner(FieldAverager):
-    def __init__(self,
-                 field_base,
-                 xmin,
-                 xmax,
-                 nbin,
-                 extra=None, **kw):
-        """
-        extra probably not useful except in a base clas where
-        we have more variables available
-        """
-        sel=self.make_selections(field_base, xmin, xmax, nbin, extra=extra)
-
-        super(FieldBinner,self).__init__(
-            field_base,
-            sel,
-            **kw
+        h,rev = eu.stat.histogram(
+            fdata,
+            min=self.xmin,
+            max=self.xmax,
+            nbin=self.nbin,
+            rev=True,
         )
+        return h, rev, fdata
 
-    def make_selections(self, field_base, xmin, xmax, nbin, extra=None):
-        selections=[]
 
-        binsize=(xmax-xmin)/float(nbin)
+    def bin_data_by_type(self, data, mcal_type):
 
-        for i in xrange(nbin):
-            ixmin = xmin + i*binsize
-            ixmax = ixmin + binsize
+        tstr=self.get_type_string(mcal_type)
+        field='%s%s' % (self.field_base, tstr)
+        if field not in data.dtype.names:
+            field=self.field_base
+            print("using base name:",field)
 
-            sel='between(%s, %g, %g)' % (field_base,ixmin,ixmax)
-            if extra is not None:
-                sel += ' & (%s)' % extra
+        return self.bin_data(data, field, element=self.element)
 
-            print(sel)
-            selections += [sel]
-        return selections
+    def _extract_xvals(self, d):
+        return d['means']
 
-    def doplot(self, d, file=None, xlabel=None, **kw):
+    def doplot(self, d, xlabel=None, xlog=False,
+               ymin=-0.0049, ymax=0.0049,
+               xmin=None,xmax=None,
+               **kw):
         """
         plot the results
 
@@ -577,34 +520,95 @@ class FieldBinner(FieldAverager):
         **kw:
             extra plotting keywords
         """
-        from pyxtools import plot
+        import pyxtools
+        from pyx import graph, deco
+        from pyx.graph import axis
 
+        if xlabel is None:
+            xlabel='x'
+
+        ydensity=kw.get('ydensity',1.5)
+        xdensity=kw.get('ydensity',1.5)
+
+        red=pyxtools.colors('red')
+        blue=pyxtools.colors('blue')
+
+        xvals=self._extract_xvals(d)
         sh=d['shear']['shear']
         sherr=d['shear']['shear_err']
 
-        plt=plot(
-            d['means'], sh[:,0], dy=sherr[:,0],
-            xlabel=xlabel,
-            ylabel=r'$g$',
-            color='blue',
-            **kw
+
+        if xlog:
+            xcls=axis.log
+        else:
+            xcls=axis.lin
+
+        xaxis=xcls(
+            title=xlabel,
+            density=xdensity,
+            min=xmin,
+            max=xmax,
         )
-        plot(
-            d['means'], sh[:,1], dy=sherr[:,1],
-            color='red', plt=plt, file=file,
-            **kw
+        yaxis=axis.lin(
+            title=r"$\langle g \rangle$",
+            density=ydensity,
+            min=ymin,
+            max=ymax,
         )
 
-        return plt
+        key=graph.key.key(pos='tr')
+        g = graph.graphxy(
+            width=8,
+            key=key,
+            x=xaxis,
+            y=yaxis,
+        )
+
+        c=graph.data.function(
+            "y(x)=0",
+            title=None,
+            min=xvals[0], max=xvals[-1],
+        )
+
+        g.plot(c)
+
+        g1values=graph.data.values(
+            x=list(xvals),
+            y=list(sh[:,0]),
+            dy=list(sherr[:,0]),
+            title=r'$g_1$',
+        )
+        g2values=graph.data.values(
+            x=list(xvals),
+            y=list(sh[:,1]),
+            dy=list(sherr[:,1]),
+            title=r'$g_2$',
+        )
+
+        symbol1=graph.style.symbol(
+            symbol=graph.style.symbol.circle,
+            symbolattrs=[blue,deco.filled([blue])],
+            size=0.1,
+        )
+        symbol2=graph.style.symbol(
+            symbol=graph.style.symbol.triangle,
+            symbolattrs=[red,deco.filled([red])],
+            size=0.1,
+        )
+
+        g.plot(g1values,[symbol1, graph.style.errorbar(errorbarattrs=[blue])])
+        g.plot(g2values,[symbol2, graph.style.errorbar(errorbarattrs=[red])])
+
+        if 'file' in kw:
+            pyxtools.write(g, kw['file'], dpi=200)
+
+        return g
 
 
 
-class S2NBinner(FieldBinner):
+class LogS2NBinner(FieldBinner):
     """
-    Bin by S/N
-
-    following variables are made available for selection
-        s2n, Ts2n, T, Tpsf
+    Bin by log10( S/N )
     """
     def __init__(self,
                  xmin,
@@ -616,81 +620,31 @@ class S2NBinner(FieldBinner):
         # note it is abbreviated; ok since in do_selection
         # we used the abbreviated for. Also s2n rather than
         # full
-        field_base='s2n'
+        field_base='mcal_s2n_r'
 
-        super(S2NBinner,self).__init__(
+        super(LogS2NBinner,self).__init__(
             field_base,
             xmin,
             xmax,
             nbin,
-            extra=other_selection,
+            selection=other_selection,
             **kw
         )
 
-    def do_selection(self, data, mcal_type, binnum):
-        """
-        cut on flags and s/n
-        """
+    def bin_data(self, data, field, **kw):
 
-        gpsf, s2n, Ts2n, T, Terr, Tpsf = \
-                self.get_selection_args(data, mcal_type)
+        s2n=data[field]
 
-        selection=self['selections'][binnum]
+        logs2n = numpy.log10( s2n.clip(min=0.001) )
 
-        cut_logic = eval(selection)
-
-        return cut_logic, s2n
-
-class LogS2NBinner(S2NBinner):
-    """
-    Bin by S/N
-
-    following variables are made available for selection
-        logs2n, Ts2n, T, Tpsf
-    """
-    def __init__(self,
-                 xmin,
-                 xmax,
-                 nbin,
-                 other_selection,
-                 **kw):
-
-        # note it is abbreviated; ok since in do_selection
-        # we used the abbreviated for. Also s2n rather than
-        # full
-        field_base='logs2n'
-
-        # note calling super of super
-        super(S2NBinner,self).__init__(
-            field_base,
-            xmin,
-            xmax,
-            nbin,
-            extra=other_selection,
-            **kw
+        h,rev = eu.stat.histogram(
+            logs2n,
+            min=numpy.log10(self.xmin),
+            max=numpy.log10(self.xmax),
+            nbin=self.nbin,
+            rev=True,
         )
-
-    def get_selection_args(self, data, mcal_type):
-        """
-        convert s2nto log s2n
-        """
-        gpsf, s2n, Ts2n, T, Terr, Tpsf=super(LogS2NBinner,self).get_selection_args(data, mcal_type)
-        logs2n=numpy.log10( s2n.clip(min=0.001))
-        return logs2n, gpsf, s2n, Ts2n, T, Terr, Tpsf
-
-    def do_selection(self, data, mcal_type, binnum):
-        """
-        cut on flags and s/n
-        """
-
-        logs2n, gpsf, s2n, Ts2n, T, Terr, Tpsf = \
-                self.get_selection_args(data, mcal_type)
-
-        selection=self['selections'][binnum]
-
-        cut_logic = eval(selection)
-
-        return cut_logic, logs2n
+        return h, rev, s2n
 
     def doplot(self, d, **kw):
         """
@@ -698,45 +652,20 @@ class LogS2NBinner(S2NBinner):
 
         parameters
         ----------
-        x: x values
-            Should be self.means
         d: dict
             result of running something like process_run or process_flist
         **kw:
             extra plotting keywords
         """
-        from pyxtools import plot
 
-        sh=d['shear']['shear']
-        sherr=d['shear']['shear_err']
-
+        kw['xlabel']=r'$S/N$'
         kw['xlog']=True
-
-        plt=plot(
-            10.0**d['means'],
-            sh[:,0],
-            dy=sherr[:,0],
-            color='blue',
-            **kw
-        )
-        plot(
-            10.0**d['means'],
-            sh[:,1],
-            dy=sherr[:,1],
-            color='red',
-            plt=plt,
-            **kw
-        )
-
-        return plt
-
+        super(LogS2NBinner,self).doplot(d, **kw)
 
 class PSFShapeBinner(FieldBinner):
     """
-    Bin by psf shape
-
-    following variables are made available for selection
-        gpsf, s2n, Ts2n, T, Terr, Tpsf
+    Bin by psf shape. We use the psf shape without metacal,
+    since we often symmetrize the metacal psf
     """
     def __init__(self,
                  xmin,
@@ -751,32 +680,18 @@ class PSFShapeBinner(FieldBinner):
         # full
         field_base='gpsf'
 
-        self['element'] = element
+        self.element = element
 
         super(PSFShapeBinner,self).__init__(
             field_base,
             xmin,
             xmax,
             nbin,
-            extra=other_selection,
+            selection=other_selection,
             **kw
         )
 
-    def do_selection(self, data, mcal_type, binnum):
-        """
-        cut on flags and s/n
-        """
-
-        gpsf, s2n, Ts2n, T, Terr, Tpsf = \
-                self.get_selection_args(data, mcal_type)
-
-        selection=self['selections'][binnum]
-
-        cut_logic = eval(selection)
-
-        return cut_logic, gpsf
-
-    def doplot(self, d, file=None, **kw):
+    def doplot(self, d, **kw):
         """
         plot the results
 
@@ -788,41 +703,12 @@ class PSFShapeBinner(FieldBinner):
             extra plotting keywords
         """
 
-        super(PSFShapeBinner,self).doplot(
-            d,
-            xlabel=r'$g_{PSF}$',
-            file=file,
-            **kw
-        )
-        '''
-        from pyxtools import plot
+        kw['xlabel']=r'$g^{psf}_{%s}$' % (1+self.element,)
+        super(PSFShapeBinner,self).doplot(d, **kw)
 
-        sh=d['shear']['shear']
-        sherr=d['shear']['shear_err']
-
-        plt=plot(
-            d['means'], sh[:,0], dy=sherr[:,0],
-            xlabel=r'$g_{psf}$',
-            ylabel=r'$g$',
-            color='blue',
-            **kw
-        )
-        plot(
-            d['means'], sh[:,1], dy=sherr[:,1],
-            color='red', plt=plt, file=file,
-            **kw
-        )
-
-        return plt
-        '''
-
-
-class TratioBinner(S2NBinner):
+class TratioBinner(FieldBinner):
     """
-    Bin by S/N
-
-    following variables are made available for selection
-        s2n, Ts2n, T, Tpsf, Tratio
+    Bin by T/Tpsf
     """
     def __init__(self,
                  xmin,
@@ -836,38 +722,48 @@ class TratioBinner(S2NBinner):
         # full
         field_base='Tratio'
 
-        # note calling super of super
-        super(S2NBinner,self).__init__(
+        super(TratioBinner,self).__init__(
             field_base,
             xmin,
             xmax,
             nbin,
-            extra=other_selection,
+            selection=other_selection,
             **kw
         )
 
-    def get_selection_args(self, data, mcal_type):
+
+    def bin_data_by_type(self, data, mcal_type):
+
+        tstr=self.get_type_string(mcal_type)
+        Tfield='mcal_T_r%s' % tstr
+        Tpsf_field='mcal_Tpsf'
+
+        Tratio = data[Tfield]/data[Tpsf_field]
+
+        h,rev = eu.stat.histogram(
+            Tratio,
+            min=self.xmin,
+            max=self.xmax,
+            nbin=self.nbin,
+            rev=True,
+        )
+        return h, rev, Tratio
+
+    def doplot(self, d, **kw):
         """
-        convert s2nto log s2n
-        """
-        gpsf, s2n, Ts2n, T, Terr, Tpsf=super(TratioBinner,self).get_selection_args(data, mcal_type)
+        plot the results
 
-        Tratio=T/Tpsf
-        return gpsf, s2n, Ts2n, T, Terr, Tpsf, Tratio
-
-    def do_selection(self, data, mcal_type, binnum):
-        """
-        cut on flags and s/n
+        parameters
+        ----------
+        d: dict
+            result of running something like process_run or process_flist
+        **kw:
+            extra plotting keywords
         """
 
-        gpsf, s2n, Ts2n, T, Terr, Tpsf, Tratio = \
-                self.get_selection_args(data, mcal_type)
+        kw['xlabel']=r'$T/T^{psf}$'
+        super(TratioBinner,self).doplot(d, **kw)
 
-        selection=self['selections'][binnum]
-
-        cut_logic = eval(selection)
-
-        return cut_logic, Tratio
 
 
 def get_shear_struct(n):
@@ -877,4 +773,104 @@ def get_shear_struct(n):
     means = numpy.zeros(n, dtype=dt)
     return means
 
+def get_run_cache_file(run):
+    fname='$TMPDIR/%s-cache.fits' % run
+    fname=os.path.expandvars(fname)
+    return fname
 
+def cache_run(run):
+    fname=get_run_cache_file(run)
+    flist=get_run_flist(run)
+
+    cache_flist(flist, fname)
+
+def cache_flist(flist, filename):
+    columns= (
+        'id',
+        'nimage_tot',
+        'flags',
+        'box_size',
+        'nimage_use',
+        'mask_frac',
+        'psfrec_T',
+        'psfrec_g',
+        'mcal_flags',
+        'mcal_g_1p',
+        'mcal_g_cov_1p',
+        'mcal_pars_1p',
+        'mcal_T_1p',
+        'mcal_T_err_1p',
+        'mcal_T_r_1p',
+        'mcal_s2n_r_1p',
+        'mcal_g_1m',
+        'mcal_g_cov_1m',
+        'mcal_pars_1m',
+        'mcal_T_1m',
+        'mcal_T_err_1m',
+        'mcal_T_r_1m',
+        'mcal_s2n_r_1m',
+        'mcal_g_2p',
+        'mcal_g_cov_2p',
+        'mcal_pars_2p',
+        'mcal_T_2p',
+        'mcal_T_err_2p',
+        'mcal_T_r_2p',
+        'mcal_s2n_r_2p',
+        'mcal_g_2m',
+        'mcal_g_cov_2m',
+        'mcal_pars_2m',
+        'mcal_T_2m',
+        'mcal_T_err_2m',
+        'mcal_T_r_2m',
+        'mcal_s2n_r_2m',
+        'mcal_g_1p_psf',
+        'mcal_g_cov_1p_psf',
+        'mcal_pars_1p_psf',
+        'mcal_T_1p_psf',
+        'mcal_T_err_1p_psf',
+        'mcal_T_r_1p_psf',
+        'mcal_s2n_r_1p_psf',
+        'mcal_g_1m_psf',
+        'mcal_g_cov_1m_psf',
+        'mcal_pars_1m_psf',
+        'mcal_T_1m_psf',
+        'mcal_T_err_1m_psf',
+        'mcal_T_r_1m_psf',
+        'mcal_s2n_r_1m_psf',
+        'mcal_g_2p_psf',
+        'mcal_g_cov_2p_psf',
+        'mcal_pars_2p_psf',
+        'mcal_T_2p_psf',
+        'mcal_T_err_2p_psf',
+        'mcal_T_r_2p_psf',
+        'mcal_s2n_r_2p_psf',
+        'mcal_g_2m_psf',
+        'mcal_g_cov_2m_psf',
+        'mcal_pars_2m_psf',
+        'mcal_T_2m_psf',
+        'mcal_T_err_2m_psf',
+        'mcal_T_r_2m_psf',
+        'mcal_s2n_r_2m_psf',
+        'mcal_g',
+        'mcal_g_cov',
+        'mcal_pars',
+        'mcal_pars_cov',
+        'mcal_gpsf',
+        'mcal_Tpsf',
+        'mcal_T',
+        'mcal_T_err',
+        'mcal_T_r',
+        'mcal_s2n_r',
+    )
+
+    nf=len(flist)
+    print("cacheing to:",filename)
+    with fitsio.FITS(filename,'rw',clobber=True) as fits:
+        for i,f in enumerate(flist):
+            print("%d/%d %s" % (i+1,nf,f))
+            data=fitsio.read(f, columns=columns)
+
+            if i==0:
+                fits.write(data)
+            else:
+                fits[-1].append(data)
