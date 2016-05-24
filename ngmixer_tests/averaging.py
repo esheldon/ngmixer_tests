@@ -5,6 +5,7 @@ import numpy
 from numpy import newaxis, sqrt, zeros
 import fitsio
 import ngmix
+import time
 
 import esutil as eu
 from esutil.numpy_util import between
@@ -17,6 +18,29 @@ def get_run_flist(run):
     flist=glob(pattern)
     print("found",len(flist),"files")
     return flist
+
+def write_result(filename, res):
+    print("writing:",filename)
+    with fitsio.FITS(filename,'rw',clobber=True) as fits:
+        fits.write(res['means'], extname='means')
+        fits.write(res['shear'], extname='shear')
+        fits.write(res['shear_nocorr'], extname='shear_nocorr')
+
+def read_result(filename):
+    print("writing:",filename)
+
+    res={}
+    with fitsio.FITS(filename) as fits:
+        if 'means' in fits:
+            res['means'] = fits['means'].read()
+            res['shear'] = fits['shear'].read()
+            res['shear_nocorr'] = fits['shear_nocorr'].read()
+        else:
+            res['means'] = fits[0].read()
+            res['shear'] = fits[1].read()
+            res['shear_nocorr'] = fits[2].read()
+
+    return res
 
 class AveragerBase(object):
     def __init__(self, step=0.01, chunksize=1000000, matchcat=None, weight_type=None):
@@ -54,6 +78,8 @@ class AveragerBase(object):
         run through a set of files, doing the sums for
         averages
         """
+        tm0=time.time()
+
         chunksize=self.chunksize
         sums=None
         nf=len(flist)
@@ -86,6 +112,8 @@ class AveragerBase(object):
 
         means=self.get_shears(sums)
         means['means'] = self.means
+
+        eu.misc.ptime(time.time()-tm0)
         return means
 
     def do_sums(self, data, sums=None):
@@ -121,20 +149,18 @@ class AveragerBase(object):
             print("Rpsf_sel:",Rpsf_sel)
 
             # terms for errors on weighted mean
-            err2sum = (       sums['gsq'][i] 
+            err2sum = (       sums['gsq'][i]
                         - 2.0*sums['gwsq'][i]*gmean
                         +     sums['wsqsum'][i]*gmean**2 )
 
             gerr = sqrt(err2sum)/wsum
 
-            c        = (Rpsf + Rpsf_sel)*gpsf_mean
-            c_nocorr = Rpsf*gpsf_mean
+            c          = (Rpsf + Rpsf_sel)*gpsf_mean
+            shear      = (gmean-c)/(R+Rsel)
+            shear_err  = gerr/(R+Rsel)
 
-            shear        = (gmean-c)/(R+Rsel)
-            shear_nocorr = (gmean-c_nocorr)/R
-
-            shear_err        = gerr/(R+Rsel)
-            shear_nocorr_err = gerr/R
+            shear_nocorr = gmean.copy()
+            shear_nocorr_err = gerr.copy()
 
             sh['shear'][i] = shear
             sh['shear_err'][i] = shear_err
@@ -499,7 +525,7 @@ class FieldBinner(AveragerBase):
         field='%s%s' % (self.field_base, tstr)
         if field not in data.dtype.names:
             field=self.field_base
-            print("using base name:",field)
+            #print("using base name:",field)
 
         return self.bin_data(data, field, element=self.element)
 
@@ -509,6 +535,8 @@ class FieldBinner(AveragerBase):
     def doplot(self, d, xlabel=None, xlog=False,
                ymin=-0.0049, ymax=0.0049,
                xmin=None,xmax=None,
+               nocorr=False,
+               fitlines=False,
                **kw):
         """
         plot the results
@@ -521,7 +549,7 @@ class FieldBinner(AveragerBase):
             extra plotting keywords
         """
         import pyxtools
-        from pyx import graph, deco
+        from pyx import graph, deco, style
         from pyx.graph import axis
 
         if xlabel is None:
@@ -534,8 +562,13 @@ class FieldBinner(AveragerBase):
         blue=pyxtools.colors('blue')
 
         xvals=self._extract_xvals(d)
-        sh=d['shear']['shear']
-        sherr=d['shear']['shear_err']
+
+        if nocorr:
+            sh=d['shear_nocorr']['shear']
+            sherr=d['shear_nocorr']['shear_err']
+        else:
+            sh=d['shear']['shear']
+            sherr=d['shear']['shear_err']
 
 
         if xlog:
@@ -556,9 +589,10 @@ class FieldBinner(AveragerBase):
             max=ymax,
         )
 
-        key=graph.key.key(pos='tr')
+        key=graph.key.key(pos='bl')
         g = graph.graphxy(
             width=8,
+            ratio=1.2,
             key=key,
             x=xaxis,
             y=yaxis,
@@ -587,17 +621,48 @@ class FieldBinner(AveragerBase):
 
         symbol1=graph.style.symbol(
             symbol=graph.style.symbol.circle,
-            symbolattrs=[blue,deco.filled([blue])],
+            symbolattrs=[red,deco.filled([red])],
             size=0.1,
         )
         symbol2=graph.style.symbol(
             symbol=graph.style.symbol.triangle,
-            symbolattrs=[red,deco.filled([red])],
+            symbolattrs=[blue,deco.filled([blue])],
             size=0.1,
         )
 
-        g.plot(g1values,[symbol1, graph.style.errorbar(errorbarattrs=[blue])])
-        g.plot(g2values,[symbol2, graph.style.errorbar(errorbarattrs=[red])])
+        g.plot(g1values,[symbol1, graph.style.errorbar(errorbarattrs=[red])])
+        g.plot(g2values,[symbol2, graph.style.errorbar(errorbarattrs=[blue])])
+
+        if fitlines:
+            import fitting
+            l1=fitting.fit_line(xvals,sh[:,0],yerr=sherr[:,0])
+            l2=fitting.fit_line(xvals,sh[:,1],yerr=sherr[:,1])
+            pars1=l1.get_result()['pars']
+            pars2=l2.get_result()['pars']
+
+            tit1=r'$g_1=%.2g g^{psf}_%d + %.2g$' % (pars1[0],self.element+1,pars1[1])
+            tit2=r'$g_2=%.2g g^{psf}_%d + %.2g$' % (pars2[0],self.element+1,pars2[1])
+            c1=graph.data.function(
+                "y(x)=%g*x + %g" % tuple(pars1),
+                title=tit1,
+                min=xvals[0], max=xvals[-1],
+            )
+            c2=graph.data.function(
+                "y(x)=%g*x + %g" % tuple(pars2),
+                title=tit2,
+                min=xvals[0], max=xvals[-1],
+            )
+
+            styles1=[
+                graph.style.line([red, style.linestyle.solid]),
+            ]
+            styles2=[
+                graph.style.line([blue, style.linestyle.dashed]),
+            ]
+
+            g.plot(c1,styles1)
+            g.plot(c2,styles2)
+
 
         if 'file' in kw:
             pyxtools.write(g, kw['file'], dpi=200)
@@ -678,9 +743,8 @@ class PSFShapeBinner(FieldBinner):
         # note it is abbreviated; ok since in do_selection
         # we used the abbreviated for. Also s2n rather than
         # full
-        field_base='gpsf'
+        field_base='psfrec_g'
 
-        self.element = element
 
         super(PSFShapeBinner,self).__init__(
             field_base,
@@ -690,6 +754,8 @@ class PSFShapeBinner(FieldBinner):
             selection=other_selection,
             **kw
         )
+
+        self.element = element
 
     def doplot(self, d, **kw):
         """
@@ -704,6 +770,7 @@ class PSFShapeBinner(FieldBinner):
         """
 
         kw['xlabel']=r'$g^{psf}_{%s}$' % (1+self.element,)
+        kw['fitlines']=True
         super(PSFShapeBinner,self).doplot(d, **kw)
 
 class TratioBinner(FieldBinner):
@@ -874,3 +941,5 @@ def cache_flist(flist, filename):
                 fits.write(data)
             else:
                 fits[-1].append(data)
+
+
