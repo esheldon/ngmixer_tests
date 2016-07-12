@@ -671,8 +671,12 @@ class FieldBinner(AveragerBase):
             print("line1: "+fmt % (pars1[0],err1[0],pars1[1],err1[1]))
             print("line2: "+fmt % (pars2[0],err2[0],pars2[1],err2[1]))
 
-            tit1=r'$g_1=%.2g ~g^{psf}_%d + %.2g$' % (pars1[0],self.element+1,pars1[1])
-            tit2=r'$g_2=%.2g ~g^{psf}_%d + %.2g$' % (pars2[0],self.element+1,pars2[1])
+            if self.element is not None:
+                tit1=r'$g_1=%.2g ~g^{psf}_%d + %.2g$' % (pars1[0],self.element+1,pars1[1])
+                tit2=r'$g_2=%.2g ~g^{psf}_%d + %.2g$' % (pars2[0],self.element+1,pars2[1])
+            else:
+                tit1=r'$g_1=%.2g ~x + %.2g$' % (pars1[0],pars1[1])
+                tit2=r'$g_2=%.2g ~x + %.2g$' % (pars2[0],pars2[1])
             c1=graph.data.function(
                 "y(x)=%g*x + %g" % tuple(pars1),
                 title=tit1,
