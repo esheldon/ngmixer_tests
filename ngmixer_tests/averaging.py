@@ -2,7 +2,7 @@ from __future__ import print_function
 import os
 from glob import glob
 import numpy
-from numpy import newaxis, sqrt, zeros
+from numpy import newaxis, sqrt, zeros, abs, log10
 import fitsio
 import ngmix
 import time
@@ -54,15 +54,15 @@ class AveragerBase(object):
 
         self.weight_type=weight_type
 
-    def process_run(self, run):
+    def process_run(self, run, ntest=None):
         """
         run through all the collated files for the specified run
         """
 
         flist=get_run_flist(run)
-        return self.process_flist(flist)
+        return self.process_flist(flist, ntest=ntest)
 
-    def process_run_cache(self, run):
+    def process_run_cache(self, run, ntest=None):
         """
         use the cached file for speed
         """
@@ -71,9 +71,9 @@ class AveragerBase(object):
         if not os.path.exists(fname):
             cache_run(run)
 
-        return self.process_flist([fname])
+        return self.process_flist([fname], ntest=ntest)
 
-    def process_flist(self, flist):
+    def process_flist(self, flist, ntest=None):
         """
         run through a set of files, doing the sums for
         averages
@@ -84,6 +84,7 @@ class AveragerBase(object):
         sums=None
         nf=len(flist)
 
+        n=0
         for i,f in enumerate(flist):
 
             print("processing %d/%d: %s" % (i+1,nf,f))
@@ -107,6 +108,10 @@ class AveragerBase(object):
                     sums=self.do_sums(data, sums=sums)
 
                     beg = beg + chunksize
+                    n += data.size
+
+                    if ntest is not None and n >= ntest:
+                        break
 
         self.means /= sums['wsum']
 
@@ -254,7 +259,17 @@ class AveragerBase(object):
         """
         the s2n cuts are for the bug not propagating flags
         """
+        #logic = (data['flags'] == 0)
+
+        if len(data['nimage_use'].shape) > 1:
+            nimages=data['nimage_use'].sum(axis=1)
+        else:
+            nimages=data['nimage_use']
         logic = (data['flags'] == 0)
+        #logic = (data['flags'] == 0) & (nimages >= 6)
+        #logic = (data['flags'] == 0) & (data['box_size']==32)
+        #logic = (data['flags'] == 0) & (data['box_size']==48)
+        #logic = (data['flags'] == 0) & (data['box_size'] <= 48)
 
         w,=numpy.where(logic)
         print("    keeping %d/%d from flag sanity cuts" % (w.size,data.size))
@@ -281,7 +296,7 @@ class AveragerBase(object):
         cut on flags and s/n
         """
 
-        s2n, Ts2n, T, Terr, Tpsf, Tratio = \
+        s2n, Ts2n, T, Terr, Tpsf, gpsf, Tratio = \
                 self.get_selection_args(data, mcal_type)
 
         cut_logic = eval(self.selection)
@@ -295,6 +310,7 @@ class AveragerBase(object):
 
         # this is the one for selections, not for Rpsf*gpsf
         Tpsf = data['mcal_Tpsf']
+        gpsf = data['mcal_gpsf']
 
         T = data['mcal_T_r%s' % tstr]
 
@@ -307,7 +323,7 @@ class AveragerBase(object):
 
         Tratio=T/Tpsf
 
-        return s2n, Ts2n, T, Terr, Tpsf, Tratio
+        return s2n, Ts2n, T, Terr, Tpsf, gpsf, Tratio
 
     def _get_weights(self, data, mcal_type):
         wtype=self.weight_type
@@ -421,6 +437,10 @@ class FieldBinner(AveragerBase):
         sanity_logic = self.do_sanity_cuts(data)
         sane_data = data[sanity_logic]
 
+        if sane_data.size == 0:
+            print("    none passed, skipping")
+            return sums
+
         # first, selecting and binning by unsheared data
         if self.selection is not None:
             logic = self.do_selection(sane_data, 'noshear')
@@ -429,6 +449,10 @@ class FieldBinner(AveragerBase):
             selected_data=sane_data[w]
         else:
             selected_data=sane_data
+
+        if selected_data.size == 0:
+            print("    none passed, skipping")
+            return sums
 
         h, rev, fvalues = self.bin_data_by_type(selected_data, 'noshear')
         assert h.size==self.nbin,"histogram size %d wrong" % h.size
@@ -555,8 +579,8 @@ class FieldBinner(AveragerBase):
         if xlabel is None:
             xlabel='x'
 
+        xdensity=kw.get('xdensity',1.5)
         ydensity=kw.get('ydensity',1.5)
-        xdensity=kw.get('ydensity',1.5)
 
         red=pyxtools.colors('red')
         blue=pyxtools.colors('blue')
@@ -637,11 +661,18 @@ class FieldBinner(AveragerBase):
             import fitting
             l1=fitting.fit_line(xvals,sh[:,0],yerr=sherr[:,0])
             l2=fitting.fit_line(xvals,sh[:,1],yerr=sherr[:,1])
-            pars1=l1.get_result()['pars']
-            pars2=l2.get_result()['pars']
+            res1=l1.get_result()
+            res2=l2.get_result()
 
-            tit1=r'$g_1=%.2g g^{psf}_%d + %.2g$' % (pars1[0],self.element+1,pars1[1])
-            tit2=r'$g_2=%.2g g^{psf}_%d + %.2g$' % (pars2[0],self.element+1,pars2[1])
+            pars1,err1=res1['pars'],res1['perr']
+            pars2,err2=res2['pars'],res2['perr']
+
+            fmt='(%.3g +/- %.3g) x + (%.3g +/- %.3g)'
+            print("line1: "+fmt % (pars1[0],err1[0],pars1[1],err1[1]))
+            print("line2: "+fmt % (pars2[0],err2[0],pars2[1],err2[1]))
+
+            tit1=r'$g_1=%.2g ~g^{psf}_%d + %.2g$' % (pars1[0],self.element+1,pars1[1])
+            tit2=r'$g_2=%.2g ~g^{psf}_%d + %.2g$' % (pars2[0],self.element+1,pars2[1])
             c1=graph.data.function(
                 "y(x)=%g*x + %g" % tuple(pars1),
                 title=tit1,
@@ -738,12 +769,14 @@ class PSFShapeBinner(FieldBinner):
                  nbin,
                  element, # 0 or 1
                  other_selection,
+                 field_base='mcal_gpsf',
                  **kw):
 
         # note it is abbreviated; ok since in do_selection
         # we used the abbreviated for. Also s2n rather than
         # full
-        field_base='psfrec_g'
+        #field_base='psfrec_g'
+        #field_base='mcal_gpsf'
 
 
         super(PSFShapeBinner,self).__init__(
@@ -772,6 +805,51 @@ class PSFShapeBinner(FieldBinner):
         kw['xlabel']=r'$g^{psf}_{%s}$' % (1+self.element,)
         kw['fitlines']=True
         super(PSFShapeBinner,self).doplot(d, **kw)
+
+
+class PositionBinner(FieldBinner):
+    """
+    Bin by psf shape. We use the psf shape without metacal,
+    since we often symmetrize the metacal psf
+    """
+    def __init__(self,
+                 xmin,
+                 xmax,
+                 nbin,
+                 element, # 0 or 1
+                 other_selection,
+                 field_base='mcal_pars',
+                 **kw):
+
+        super(PositionBinner,self).__init__(
+            field_base,
+            xmin,
+            xmax,
+            nbin,
+            selection=other_selection,
+            **kw
+        )
+
+        self.element = element
+
+    def doplot(self, d, **kw):
+        """
+        plot the results
+
+        parameters
+        ----------
+        d: dict
+            result of running something like process_run or process_flist
+        **kw:
+            extra plotting keywords
+        """
+
+        kw['xlabel']=r'$cen_{%s}$' % (1+self.element,)
+        kw['fitlines']=False
+        super(PositionBinner,self).doplot(d, **kw)
+
+
+
 
 class TratioBinner(FieldBinner):
     """
@@ -832,6 +910,142 @@ class TratioBinner(FieldBinner):
         super(TratioBinner,self).doplot(d, **kw)
 
 
+class PSFTBinner(FieldBinner):
+    """
+    Bin by psf shape. We use the psf shape without metacal,
+    since we often symmetrize the metacal psf
+    """
+    def __init__(self,
+                 xmin,
+                 xmax,
+                 nbin,
+                 other_selection,
+                 field_base='mcal_Tpsf',
+                 **kw):
+
+        # note it is abbreviated; ok since in do_selection
+        # we used the abbreviated for. Also s2n rather than
+        # full
+        #field_base='psfrec_g'
+        #field_base='mcal_gpsf'
+
+
+        super(PSFTBinner,self).__init__(
+            field_base,
+            xmin,
+            xmax,
+            nbin,
+            selection=other_selection,
+            **kw
+        )
+
+    def doplot(self, d, **kw):
+        """
+        plot the results
+
+        parameters
+        ----------
+        d: dict
+            result of running something like process_run or process_flist
+        **kw:
+            extra plotting keywords
+        """
+
+        kw['xlabel']=r'$T^{psf}$'
+        kw['fitlines']=False
+        super(PSFTBinner,self).doplot(d, **kw)
+
+class TBinner(FieldBinner):
+    """
+    Bin by psf shape. We use the psf shape without metacal,
+    since we often symmetrize the metacal psf
+    """
+    def __init__(self,
+                 xmin,
+                 xmax,
+                 nbin,
+                 other_selection,
+                 field_base='mcal_T_r',
+                 **kw):
+
+        # note it is abbreviated; ok since in do_selection
+        # we used the abbreviated for. Also s2n rather than
+        # full
+        #field_base='psfrec_g'
+        #field_base='mcal_gpsf'
+
+
+        super(TBinner,self).__init__(
+            field_base,
+            xmin,
+            xmax,
+            nbin,
+            selection=other_selection,
+            **kw
+        )
+
+    def doplot(self, d, **kw):
+        """
+        plot the results
+
+        parameters
+        ----------
+        d: dict
+            result of running something like process_run or process_flist
+        **kw:
+            extra plotting keywords
+        """
+
+        kw['xlabel']=r'$T$'
+        kw['fitlines']=False
+        super(TBinner,self).doplot(d, **kw)
+
+class MaskFracBinner(FieldBinner):
+    """
+    Bin by psf shape. We use the psf shape without metacal,
+    since we often symmetrize the metacal psf
+    """
+    def __init__(self,
+                 xmin,
+                 xmax,
+                 nbin,
+                 other_selection,
+                 field_base='mask_frac',
+                 **kw):
+
+        # note it is abbreviated; ok since in do_selection
+        # we used the abbreviated for. Also s2n rather than
+        # full
+        #field_base='psfrec_g'
+        #field_base='mcal_gpsf'
+
+
+        super(MaskFracBinner,self).__init__(
+            field_base,
+            xmin,
+            xmax,
+            nbin,
+            selection=other_selection,
+            **kw
+        )
+
+    def doplot(self, d, **kw):
+        """
+        plot the results
+
+        parameters
+        ----------
+        d: dict
+            result of running something like process_run or process_flist
+        **kw:
+            extra plotting keywords
+        """
+
+        kw['xlabel']='masked fraction'
+        kw['fitlines']=False
+        super(MaskFracBinner,self).doplot(d, **kw)
+
+
 
 def get_shear_struct(n):
     dt=[('shear','f8',2),
@@ -852,7 +1066,7 @@ def cache_run(run):
     cache_flist(flist, fname)
 
 def cache_flist(flist, filename):
-    columns= (
+    columns= [
         'id',
         'nimage_tot',
         'flags',
@@ -928,18 +1142,34 @@ def cache_flist(flist, filename):
         'mcal_T_err',
         'mcal_T_r',
         'mcal_s2n_r',
-    )
+    ]
+
+    first=True
+
+    tmp=fitsio.read(flist[0], rows=[0])
+    for mod in ['gauss','exp']:
+        n='%s_pars' % mod
+        if n in tmp.dtype.names:
+            print("adding",mod,"columns")
+            for n in ['pars','s2n_r','T_r','T_err']:
+                name='%s_%s' % (mod, n)
+                columns += [name]
 
     nf=len(flist)
     print("cacheing to:",filename)
     with fitsio.FITS(filename,'rw',clobber=True) as fits:
         for i,f in enumerate(flist):
             print("%d/%d %s" % (i+1,nf,f))
-            data=fitsio.read(f, columns=columns)
 
-            if i==0:
-                fits.write(data)
-            else:
-                fits[-1].append(data)
+            try:
+                data=fitsio.read(f, columns=columns)
+
+                if first:
+                    fits.write(data)
+                    first=False
+                else:
+                    fits[-1].append(data)
+            except IOError as err:
+                print(str(err))
 
 
