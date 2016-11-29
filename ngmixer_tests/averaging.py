@@ -455,6 +455,9 @@ class FieldBinner(AveragerBase):
             return sums
 
         h, rev, fvalues = self.bin_data_by_type(selected_data, 'noshear')
+        if h is None:
+            return sums
+
         assert h.size==self.nbin,"histogram size %d wrong" % h.size
 
         for binnum in xrange(h.size):
@@ -533,13 +536,17 @@ class FieldBinner(AveragerBase):
         else:
             fdata=data[field]
 
-        h,rev = eu.stat.histogram(
-            fdata,
-            min=self.xmin,
-            max=self.xmax,
-            nbin=self.nbin,
-            rev=True,
-        )
+        try:
+            h,rev = eu.stat.histogram(
+                fdata,
+                min=self.xmin,
+                max=self.xmax,
+                nbin=self.nbin,
+                rev=True,
+            )
+        except ValueError:
+            return None,None,None
+
         return h, rev, fdata
 
 
