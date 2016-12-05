@@ -1,8 +1,18 @@
+"""
+
+>>> numpy.percentile(pg[:,0], [5.0, 95.0])
+array([-0.01466833,  0.02719123])
+
+>>> numpy.percentile(pg[:,1], [5.0, 95.0])
+array([-0.01281529,  0.02913015])
+
+"""
 from __future__ import print_function
 import os
 from glob import glob
 import numpy
 from numpy import newaxis, sqrt, zeros, abs, log10
+from pprint import pprint
 import fitsio
 import ngmix
 import time
@@ -211,15 +221,25 @@ class AveragerBase(object):
         g2p = sums['g_2p'][:,1]*winv
         g2m = sums['g_2m'][:,1]*winv
 
-        g1p_psf = sums['g_1p_psf'][:,0]*winv
-        g1m_psf = sums['g_1m_psf'][:,0]*winv
-        g2p_psf = sums['g_2p_psf'][:,1]*winv
-        g2m_psf = sums['g_2m_psf'][:,1]*winv
-
         R[:,0] = (g1p - g1m)*factor
         R[:,1] = (g2p - g2m)*factor
-        Rpsf[:,0] = (g1p_psf - g1m_psf)*factor
-        Rpsf[:,1] = (g2p_psf - g2m_psf)*factor
+
+        if self.do_Rpsf:
+            g1p_psf = sums['g_1p_psf'][:,0]*winv
+            g1m_psf = sums['g_1m_psf'][:,0]*winv
+            g2p_psf = sums['g_2p_psf'][:,1]*winv
+            g2m_psf = sums['g_2m_psf'][:,1]*winv
+
+            Rpsf[:,0] = (g1p_psf - g1m_psf)*factor
+            Rpsf[:,1] = (g2p_psf - g2m_psf)*factor
+
+            s_g1p_psf = sums['s_g_1p_psf'][:,0]/sums['s_wsum_1p_psf']
+            s_g1m_psf = sums['s_g_1m_psf'][:,0]/sums['s_wsum_1m_psf']
+            s_g2p_psf = sums['s_g_2p_psf'][:,1]/sums['s_wsum_2p_psf']
+            s_g2m_psf = sums['s_g_2m_psf'][:,1]/sums['s_wsum_2m_psf']
+
+            Rpsf_sel[:,0] = (s_g1p_psf - s_g1m_psf)*factor
+            Rpsf_sel[:,1] = (s_g2p_psf - s_g2m_psf)*factor
 
         print("R:",R)
         print("Rpsf:",Rpsf)
@@ -230,15 +250,8 @@ class AveragerBase(object):
         s_g2p = sums['s_g_2p'][:,1]/sums['s_wsum_2p']
         s_g2m = sums['s_g_2m'][:,1]/sums['s_wsum_2m']
 
-        s_g1p_psf = sums['s_g_1p_psf'][:,0]/sums['s_wsum_1p_psf']
-        s_g1m_psf = sums['s_g_1m_psf'][:,0]/sums['s_wsum_1m_psf']
-        s_g2p_psf = sums['s_g_2p_psf'][:,1]/sums['s_wsum_2p_psf']
-        s_g2m_psf = sums['s_g_2m_psf'][:,1]/sums['s_wsum_2m_psf']
-
         Rsel[:,0] = (s_g1p - s_g1m)*factor
         Rsel[:,1] = (s_g2p - s_g2m)*factor
-        Rpsf_sel[:,0] = (s_g1p_psf - s_g1m_psf)*factor
-        Rpsf_sel[:,1] = (s_g2p_psf - s_g2m_psf)*factor
 
         print("Rsel:",Rsel)
         print("Rpsf_sel:",Rpsf_sel)
@@ -260,6 +273,7 @@ class AveragerBase(object):
         the s2n cuts are for the bug not propagating flags
         """
         #logic = (data['flags'] == 0)
+
 
         if len(data['nimage_use'].shape) > 1:
             nimages=data['nimage_use'].sum(axis=1)
@@ -430,6 +444,13 @@ class FieldBinner(AveragerBase):
         do all the sums, no binning for base class
         """
 
+        names=data.dtype.names
+
+        if 'mcal_g_1m_psf' in names:
+            self.do_Rpsf =True
+        else:
+            self.do_Rpsf =False
+
         if sums is None:
             sums=self._get_sums_struct(self.nbin)
 
@@ -445,7 +466,8 @@ class FieldBinner(AveragerBase):
         if self.selection is not None:
             logic = self.do_selection(sane_data, 'noshear')
             w,=numpy.where(logic)
-            print("    finally kept %d/%d after extra cuts" % (w.size, data.size))
+            print("    finally kept %d/%d after "
+                  "extra cuts" % (w.size, data.size))
             selected_data=sane_data[w]
         else:
             selected_data=sane_data
@@ -478,11 +500,14 @@ class FieldBinner(AveragerBase):
 
                 # terms for errors
                 sums['wsqsum'][binnum] += (wts**2).sum()
-                sums['gsq'][binnum]    += (wa**2 * bdata['mcal_g']**2).sum(axis=0)
-                sums['gwsq'][binnum]   += (wa**2 * bdata['mcal_g']).sum(axis=0)
+                sums['gsq'][binnum]    += \
+                        (wa**2 * bdata['mcal_g']**2).sum(axis=0)
+                sums['gwsq'][binnum]   += \
+                        (wa**2 * bdata['mcal_g']).sum(axis=0)
 
-                # now the response terms, also based on selections/weights from
-                # unsheared data
+                # now the response terms, also based on selections/weights
+                # from unsheared data
+
                 for type in ngmix.metacal.METACAL_TYPES:
                     if type=='noshear':
                         continue
@@ -490,15 +515,27 @@ class FieldBinner(AveragerBase):
                     tstr=self.get_type_string(type)
 
                     mcalname='mcal_g%s' % tstr
+                    if mcalname not in names:
+                        #print("skipping:",type)
+                        continue
+
                     sumname='g%s' % tstr
 
                     if mcalname in bdata.dtype.names:
-                        sums[sumname][binnum] += (wa*bdata[mcalname]).sum(axis=0)
+                        sums[sumname][binnum] += \
+                                (wa*bdata[mcalname]).sum(axis=0)
 
 
         # now, selecting and binning by sheared data
         for type in ngmix.metacal.METACAL_TYPES:
             if type=='noshear':
+                continue
+
+            # just make sure we have this field
+            tstr=self.get_type_string(type)
+            mcalname='mcal_g%s' % tstr
+            if mcalname not in names:
+                #print("skipping:",type)
                 continue
 
             if self.selection is not None:
@@ -1086,6 +1123,19 @@ def cache_flist(flist, filename):
         'mask_frac',
         'psfrec_T',
         'psfrec_g',
+
+        'mcal_g',
+        'mcal_g_cov',
+        'mcal_pars',
+        'mcal_pars_cov',
+        'mcal_gpsf',
+        'mcal_Tpsf',
+        'mcal_T',
+        'mcal_T_err',
+        'mcal_T_r',
+        'mcal_s2n_r',
+
+
         'mcal_flags',
         'mcal_g_1p',
         'mcal_g_cov_1p',
@@ -1115,6 +1165,10 @@ def cache_flist(flist, filename):
         'mcal_T_err_2m',
         'mcal_T_r_2m',
         'mcal_s2n_r_2m',
+    ]
+
+
+    """
         'mcal_g_1p_psf',
         'mcal_g_cov_1p_psf',
         'mcal_pars_1p_psf',
@@ -1143,20 +1197,12 @@ def cache_flist(flist, filename):
         'mcal_T_err_2m_psf',
         'mcal_T_r_2m_psf',
         'mcal_s2n_r_2m_psf',
-        'mcal_g',
-        'mcal_g_cov',
-        'mcal_pars',
-        'mcal_pars_cov',
-        'mcal_gpsf',
-        'mcal_Tpsf',
-        'mcal_T',
-        'mcal_T_err',
-        'mcal_T_r',
-        'mcal_s2n_r',
     ]
+    """
 
     first=True
 
+    """
     tmp=fitsio.read(flist[0], rows=[0])
     for mod in ['gauss','exp']:
         n='%s_pars' % mod
@@ -1165,6 +1211,10 @@ def cache_flist(flist, filename):
             for n in ['pars','s2n_r','T_r','T_err']:
                 name='%s_%s' % (mod, n)
                 columns += [name]
+    """
+
+
+    pprint(columns)
 
     nf=len(flist)
     print("cacheing to:",filename)
