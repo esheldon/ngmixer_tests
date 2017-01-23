@@ -301,15 +301,7 @@ class AveragerBase(object):
         #logic = (data['flags'] == 0)
 
 
-        if len(data['nimage_use'].shape) > 1:
-            nimages=data['nimage_use'].sum(axis=1)
-        else:
-            nimages=data['nimage_use']
         logic = (data['flags'] == 0)
-        #logic = (data['flags'] == 0) & (nimages >= 6)
-        #logic = (data['flags'] == 0) & (data['box_size']==32)
-        #logic = (data['flags'] == 0) & (data['box_size']==48)
-        #logic = (data['flags'] == 0) & (data['box_size'] <= 48)
 
         w,=numpy.where(logic)
         print("    keeping %d/%d from flag sanity cuts" % (w.size,data.size))
@@ -352,13 +344,19 @@ class AveragerBase(object):
         Tpsf = data['mcal_Tpsf']
         gpsf = data['mcal_gpsf']
 
-        T = data['mcal_T_r%s' % tstr]
+        if 'mcal_T_r' in data.dtype.names:
+            T = data['mcal_T_r%s' % tstr]
+        else:
+            T = data['mcal_T%s' % tstr]
 
         Terr= data['mcal_T_err%s' % tstr]
 
         Ts2n = T/Terr
 
-        s2n_field = 'mcal_s2n_r%s' % tstr
+        if 'mcal_s2n_r' in data.dtype.names:
+            s2n_field = 'mcal_s2n_r%s' % tstr
+        else:
+            s2n_field = 'mcal_s2n%s' % tstr
         s2n = data[s2n_field]
 
         Tratio=T/Tpsf
