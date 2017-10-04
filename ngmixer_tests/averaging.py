@@ -26,6 +26,8 @@ def get_run_flist(run):
     pattern=os.path.join(dir, '*.fits')
     print("pattern:",pattern)
     flist=glob(pattern)
+    flist.sort()
+
     print("found",len(flist),"files")
     return flist
 
@@ -64,12 +66,16 @@ class AveragerBase(object):
 
         self.weight_type=weight_type
 
-    def process_run(self, run, ntest=None):
+    def process_run(self, run, start=None, end=None, ntest=None):
         """
         run through all the collated files for the specified run
         """
 
         flist=get_run_flist(run)
+
+        if start is not None:
+            flist=flist[start:end]
+
         return self.process_flist(flist, ntest=ntest)
 
     def process_run_cache(self, run, ntest=None):
@@ -107,6 +113,8 @@ class AveragerBase(object):
                 if (nrows % chunksize) > 0:
                     nchunks += 1
 
+                self._set_do_Rpsf(hdu[0:10])
+
                 beg=0
                 for i in xrange(nchunks):
                     print("    chunk %d/%d" % (i+1,nchunks))
@@ -123,13 +131,29 @@ class AveragerBase(object):
                     if ntest is not None and n >= ntest:
                         break
 
-        self.means /= sums['wsum']
+        # self.means is really a sum
+        sums['mean_sum'] = self.means
+
+        self.means_sums = self.means.copy()
+        self.means /= sums['mean_sum']/sums['wsum']
+
+        #sums['means_sums'] = self.means_sums
+        #sums['means'] = self.means_sums
 
         means=self.get_shears(sums)
-        means['means'] = self.means
+        #means['means_sums'] = sums['means_sums']
+        #means['means'] = sums['means_sums']/sums['wsum']
 
         eu.misc.ptime(time.time()-tm0)
         return means
+
+    def _set_do_Rpsf(self, data):
+        names=data.dtype.names
+        if 'mcal_g_1m_psf' in names:
+            self.do_Rpsf =True
+        else:
+            self.do_Rpsf =False
+
 
     def do_sums(self, data, sums=None):
         raise NotImplementedError("implement in a base class")
@@ -185,6 +209,8 @@ class AveragerBase(object):
 
         means['shear'] = sh
         means['shear_nocorr'] = sh_nocorr
+
+        means['means'] = sums['mean_sum']/sums['wsum']
 
         return means
 
@@ -275,15 +301,7 @@ class AveragerBase(object):
         #logic = (data['flags'] == 0)
 
 
-        if len(data['nimage_use'].shape) > 1:
-            nimages=data['nimage_use'].sum(axis=1)
-        else:
-            nimages=data['nimage_use']
         logic = (data['flags'] == 0)
-        #logic = (data['flags'] == 0) & (nimages >= 6)
-        #logic = (data['flags'] == 0) & (data['box_size']==32)
-        #logic = (data['flags'] == 0) & (data['box_size']==48)
-        #logic = (data['flags'] == 0) & (data['box_size'] <= 48)
 
         w,=numpy.where(logic)
         print("    keeping %d/%d from flag sanity cuts" % (w.size,data.size))
@@ -326,13 +344,19 @@ class AveragerBase(object):
         Tpsf = data['mcal_Tpsf']
         gpsf = data['mcal_gpsf']
 
-        T = data['mcal_T_r%s' % tstr]
+        if 'mcal_T_r' in data.dtype.names:
+            T = data['mcal_T_r%s' % tstr]
+        else:
+            T = data['mcal_T%s' % tstr]
 
         Terr= data['mcal_T_err%s' % tstr]
 
         Ts2n = T/Terr
 
-        s2n_field = 'mcal_s2n_r%s' % tstr
+        if 'mcal_s2n_r' in data.dtype.names:
+            s2n_field = 'mcal_s2n_r%s' % tstr
+        else:
+            s2n_field = 'mcal_s2n%s' % tstr
         s2n = data[s2n_field]
 
         Tratio=T/Tpsf
@@ -416,6 +440,8 @@ class AveragerBase(object):
             ('s_g_1m_psf','f8',2),
             ('s_g_2p_psf','f8',2),
             ('s_g_2m_psf','f8',2),
+
+            ('mean_sum','f8'),
         ]
         return dt
 
@@ -701,7 +727,46 @@ class FieldBinner(AveragerBase):
         g.plot(g1values,[symbol1, graph.style.errorbar(errorbarattrs=[red])])
         g.plot(g2values,[symbol2, graph.style.errorbar(errorbarattrs=[blue])])
 
-        if fitlines:
+        use_errors=True
+        if fitlines and not use_errors:
+            res1=fitline(xvals,sh[:,0])
+            res2=fitline(xvals,sh[:,1])
+
+
+            fmt='(%(slope).3g +/- %(slope_err).3g) x + (%(offset).3g +/- %(offset_err).3g)'
+            print("line1: "+fmt % res1)
+            print("line2: "+fmt % res2)
+
+            if self.element is not None:
+                tit1=r'$g_1=%.2g ~g^{psf}_%d + %.2g$' % (res1['slope'],self.element+1,res1['offset'])
+                tit2=r'$g_2=%.2g ~g^{psf}_%d + %.2g$' % (res2['slope'],self.element+1,res2['offset'])
+            else:
+                tit1=r'$g_1=%.2g ~x + %.2g$' % (res1['slope'],res1['offset'])
+                tit2=r'$g_2=%.2g ~x + %.2g$' % (res1['slope'],res1['offset'])
+
+            c1=graph.data.function(
+                "y(x)=%g*x + %g" % tuple( (res1['slope'], res1['offset'])),
+                title=tit1,
+                min=xvals[0], max=xvals[-1],
+            )
+            c2=graph.data.function(
+                "y(x)=%g*x + %g" % tuple( (res2['slope'], res2['offset'])),
+                title=tit2,
+                min=xvals[0], max=xvals[-1],
+            )
+
+            styles1=[
+                graph.style.line([red, style.linestyle.solid]),
+            ]
+            styles2=[
+                graph.style.line([blue, style.linestyle.dashed]),
+            ]
+
+            g.plot(c1,styles1)
+            g.plot(c2,styles2)
+
+        if fitlines and use_errors:
+            # old code
             import fitting
             l1=fitting.fit_line(xvals,sh[:,0],yerr=sherr[:,0])
             l2=fitting.fit_line(xvals,sh[:,1],yerr=sherr[:,1])
@@ -1241,5 +1306,56 @@ def cache_flist(flist, filename):
                     fits[-1].append(data)
             except IOError as err:
                 print(str(err))
+
+# quick line fit pulled from great3-public code
+def _calculateSvalues(xarr, yarr, sigma2=1.):
+    """Calculates the intermediate S values required for basic linear regression.
+
+    See, e.g., Numerical Recipes (Press et al 1992) Section 15.2.
+    """
+    if len(xarr) != len(yarr):
+        raise ValueError("Input xarr and yarr differ in length!")
+    if len(xarr) <= 1:
+        raise ValueError("Input arrays must have 2 or more values elements.")
+
+    S = len(xarr) / sigma2
+    Sx = numpy.sum(xarr / sigma2)
+    Sy = numpy.sum(yarr / sigma2)
+    Sxx = numpy.sum(xarr * xarr / sigma2)
+    Sxy = numpy.sum(xarr * yarr / sigma2)
+    return (S, Sx, Sy, Sxx, Sxy)
+
+def fitline(xarr, yarr):
+    """Fit a line y = a + b * x to input x and y arrays by least squares.
+
+    Returns the tuple (a, b, Var(a), Cov(a, b), Var(b)), after performing an internal estimate of
+    measurement errors from the best-fitting model residuals.
+
+    See Numerical Recipes (Press et al 1992; Section 15.2) for a clear description of the details
+    of this simple regression.
+    """
+    # Get the S values (use default sigma2, best fit a and b still valid for stationary data)
+    S, Sx, Sy, Sxx, Sxy = _calculateSvalues(xarr, yarr)
+    # Get the best fit a and b
+    Del = S * Sxx - Sx * Sx
+    a = (Sxx * Sy - Sx * Sxy) / Del
+    b = (S * Sxy - Sx * Sy) / Del
+    # Use these to estimate the sigma^2 by residuals from the best-fitting model
+    ymodel = a + b * xarr
+    sigma2 = numpy.mean((yarr - ymodel)**2)
+    # And use this to get model parameter error estimates
+    var_a  = sigma2 * Sxx / Del
+    cov_ab = - sigma2 * Sx / Del
+    var_b  = sigma2 * S / Del
+
+    a_err = numpy.sqrt(var_a)
+    b_err = numpy.sqrt(var_b)
+    return {'offset':a,
+            'offset_err':a_err,
+            'slope':b,
+            'slope_err':b_err,
+            'cov':cov_ab}
+
+    #return a, a_err, b, b_err, cov_ab
 
 
