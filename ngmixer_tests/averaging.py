@@ -601,7 +601,7 @@ class FieldBinner(AveragerBase):
         return d['means']
 
     def doplot(self, d, xlabel=None, xlog=False,
-               ymin=-0.0049, ymax=0.0049,
+               ymin=-0.0029, ymax=0.0029,
                xmin=None,xmax=None,
                nocorr=False,
                fitlines=False,
@@ -744,7 +744,16 @@ class FieldBinner(AveragerBase):
 
 
         if 'file' in kw:
+            print("writing:",kw['file'])
             pyxtools.write(g, kw['file'], dpi=200)
+
+        if fitlines and 'fitfile' in kw:
+            print("writing:",kw['fitfile'])
+            with open(kw['fitfile'],'w') as fobj:
+                fobj.write(repr(l1))
+                fobj.write('\n')
+                fobj.write(repr(l2))
+                fobj.write('\n')
 
         return g
 
